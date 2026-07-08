@@ -3,31 +3,75 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Поводырь</title>
-<link rel="icon" href="data:,">
+<title>Sentio</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
+  /* Sentio — чистый ч/б, SF Pro, макс. контраст = доступность. Логика в <script> не менялась. */
+  :root {
+    --bg:#fff; --ink:#1d1d1f; --grey:#6e6e73; --faint:#a1a1a6; --line:#d2d2d7; --panel:#f5f5f7;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue","Inter",sans-serif;
+  }
+  * { box-sizing: border-box; }
   /* cursor:pointer — обязателен: iOS Safari не шлёт click в document-делегирование с некликабельных элементов */
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #111; color: #eee; cursor: pointer; }
-  video { width: 100%; max-width: 480px; background: #000; border-radius: 8px; }
-  button { font-size: 18px; padding: 12px 20px; margin: 8px 8px 8px 0; border-radius: 8px; border: none; background: #2b6; color: #fff; }
-  button:disabled { background: #555; }
-  button.stop { background: #d43; }
-  #btnMic { font-size: 22px; padding: 16px 24px; background: #36c; }
-  #btnMic.listening { background: #c3a; }
-  input { font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; width: 100%; max-width: 460px; box-sizing: border-box; }
-  #bigCmd { font-size: 28px; font-weight: 700; min-height: 40px; margin: 8px 0; color: #6f6; }
-  #judge { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
-  #lastFrame { width: 200px; border-radius: 6px; background: #000; }
-  #log { font-size: 14px; line-height: 1.5; flex: 1; min-width: 250px; max-height: 320px; overflow-y: auto; }
-  #log div { border-bottom: 1px solid #333; padding: 3px 0; }
-  .lat { color: #8cf; }
-  .err { color: #f66; }
-  .haz { color: #fa0; font-weight: 700; }
-  label { font-size: 14px; color: #aaa; display: block; margin-top: 8px; }
+  body {
+    font-family: var(--font); margin: 0 auto; max-width: 640px; padding: 22px 18px 44px;
+    background: var(--bg); color: var(--ink); cursor: pointer; -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+  header { display: flex; align-items: center; margin: 2px 0 18px; }
+  header svg { height: 34px; width: auto; }
+  video { width: 100%; background: #000; border-radius: 16px; display: block; margin: 4px 0 14px;
+    border: 1px solid var(--line); }
+  /* живая команда — самый важный элемент, крупно */
+  #bigCmd { font-size: clamp(28px,7vw,40px); font-weight: 640; letter-spacing: -.02em; line-height: 1.14;
+    min-height: 46px; margin: 14px 0 6px; color: var(--ink); text-wrap: balance; }
+  #status { font-size: 15px; color: var(--grey); font-weight: 450; min-height: 20px; }
+  label { font-size: 14px; color: var(--grey); display: block; margin: 16px 0 7px; line-height: 1.42; }
+  input {
+    font: inherit; font-size: 17px; padding: 13px 15px; border-radius: 12px;
+    border: 1.5px solid var(--line); background: #fff; color: var(--ink); width: 100%;
+    -webkit-appearance: none;
+  }
+  input:focus { outline: none; border-color: var(--ink); }
+  /* кнопки — крупные тач-таргеты, мoно: контур = вторичная, залив = первичная, состояние — контрастом а не цветом */
+  button {
+    font: inherit; font-size: 17px; font-weight: 560; min-height: 52px; padding: 14px 22px;
+    margin: 7px 8px 0 0; border-radius: 13px; border: 1.5px solid var(--ink);
+    background: #fff; color: var(--ink); cursor: pointer; -webkit-appearance: none;
+    transition: transform .06s ease;
+  }
+  button:active { transform: scale(.97); }
+  button:disabled { border-color: var(--line); color: var(--faint); background: #fff; }
+  #btnStart, #btnMic { background: var(--ink); color: #fff; }
+  #btnStart:disabled, #btnMic:disabled { background: #fff; color: var(--faint); border-color: var(--line); }
+  button.stop { background: var(--ink); color: #fff; }
+  #btnMic { font-size: 18px; }
+  /* слушаем — инверсия + пульс (видимое состояние без цвета) */
+  #btnMic.listening { background: #fff; color: var(--ink); border-color: var(--ink);
+    box-shadow: 0 0 0 0 rgba(29,29,31,.35); animation: sentio-pulse 1.4s infinite; }
+  @keyframes sentio-pulse { 0%{box-shadow:0 0 0 0 rgba(29,29,31,.35)} 70%{box-shadow:0 0 0 16px rgba(29,29,31,0)} 100%{box-shadow:0 0 0 0 rgba(29,29,31,0)} }
+  /* judge view — служебная консоль для зрячих отладчиков */
+  #judge { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 22px; padding-top: 18px;
+    border-top: 1px solid var(--line); }
+  #lastFrame { width: 220px; max-width: 100%; border-radius: 12px; background: #000; border: 1px solid var(--line); }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.55;
+    flex: 1; min-width: 240px; max-height: 320px; overflow-y: auto; color: var(--grey); }
+  #log div { border-bottom: 1px solid var(--line); padding: 4px 0; }
+  .lat { color: var(--faint); }
+  .err { color: var(--ink); font-weight: 700; }
+  .haz { color: var(--ink); font-weight: 700; text-decoration: underline; }
 </style>
 </head>
 <body>
-<h3 style="margin:4px 0">Поводырь</h3>
+<header><svg viewBox="0 0 392 90" role="img" aria-label="Sentio" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <circle cx="20" cy="22" r="7" fill="#e6e6ea"/>
+  <circle cx="20" cy="45" r="7" fill="#1d1d1f"/>
+  <circle cx="20" cy="68" r="7" fill="#1d1d1f"/>
+  <circle cx="44" cy="22" r="7" fill="#1d1d1f"/>
+  <circle cx="44" cy="45" r="7" fill="#e6e6ea"/>
+  <circle cx="44" cy="68" r="7" fill="#e6e6ea"/>
+  <text x="78" y="62" font-family="-apple-system,'SF Pro Display','Helvetica Neue',Arial,sans-serif" font-size="54" font-weight="700" letter-spacing="-2" fill="#1d1d1f">Sentio</text>
+</svg></header>
 <video id="cam" playsinline autoplay muted aria-hidden="true"></video>
 <label for="goal">Цель (пусто — описываю, что впереди). Коснись экрана и скажи: «хочу дойти до …»; «стоп» — остановить; «что вокруг» — снова описание; «говори быстрее/медленнее» — темп:</label>
 <input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
