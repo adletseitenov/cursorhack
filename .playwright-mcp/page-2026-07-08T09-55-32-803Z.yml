@@ -1,9 +1,0 @@
-- generic [active] [ref=f1e1]:
-  - heading "Поводырь" [level=3] [ref=f1e2]
-  - generic [ref=f1e4]: "Цель:"
-  - textbox [ref=f1e5]: бутылка воды на столе
-  - generic [ref=f1e6]:
-    - button "Старт камеры" [ref=f1e7]
-    - button "Навигация" [disabled] [ref=f1e8]
-    - button "Один кадр" [disabled] [ref=f1e9]
-    - button "Шутаут" [disabled] [ref=f1e10]

@@ -1,6 +1,0 @@
-- generic [active] [ref=e1]:
-  - heading "Поводырь" [level=3] [ref=e2]
-  - generic [ref=e4]:
-    - button "Старт камеры" [ref=e5]
-    - button "Один кадр → анализ" [disabled] [ref=e6]
-    - button "Шутаут моделей" [disabled] [ref=e7]
