@@ -97,7 +97,7 @@ document.getElementById("btnStart").onclick = async () => {
       log("Камера потеряна (трек завершён)", "err");
       speak("Камера потеряна. Перезапустите камеру.");
       stopNav();
-      stopBgListening();
+      stopCallMic();
       // без камеры голос вести не может — гасим всё, кроме повторного старта камеры
       for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic", "btnEars"]) document.getElementById(id).disabled = true;
     };
@@ -109,7 +109,7 @@ document.getElementById("btnStart").onclick = async () => {
       : "Камера включена. Описываю, что впереди. " +
         (alwaysListen ? "Скажите, куда вести — я слушаю." : "Коснитесь экрана и скажите, куда вести."));
     if (!navOn) startNav(false);
-    if (alwaysListen) setTimeout(startBgListening, 2500); // слух — после того как камера и речь устаканятся
+    startCallMic(); // мик открывается один раз и живёт как звонок (жест кнопки ещё активен)
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
   }
@@ -212,8 +212,8 @@ function parseVoiceCommand(phrase) {
 
 function startListening() {
   if (listening) return; // второй rec.start() поверх первого кидает InvalidStateError
+  if (earStream) { tapListen(); return; } // мик уже живёт как звонок — окно из того же потока
   if (!SR || sttMode === "vlm") { startVlmListening(); return; } // резервный канал: аудио → vision-модель
-  stopBgListening(); // одна SR-сессия на страницу: фоновый слух уступает tap-сессии
   try { speechSynthesis.cancel(); } catch (e) {}
   listening = true;
   btnMic.classList.add("listening");
@@ -226,7 +226,6 @@ function startListening() {
     listening = false;
     btnMic.classList.remove("listening");
     btnMic.textContent = "🎤 Цель голосом";
-    setTimeout(startBgListening, 400); // вернуть фоновый слух после tap-сессии
   };
   rec.onresult = (e) => {
     done();
@@ -297,6 +296,7 @@ function handleVoiceCommand(cmd, phrase) {
     goalEl.value = "";
     history = [];
     goalEpoch++;
+    lastSpoken = ""; repeatRun = 0; // явная команда — первый ответ не должен глохнуть как «повтор»
     log("Голос: режим описания");
     if (!navOn) startNav(false);
     speak("Описываю, что впереди.");
@@ -306,6 +306,7 @@ function handleVoiceCommand(cmd, phrase) {
   history = [];
   arrivedStreak = 0;
   goalEpoch++;
+  lastSpoken = ""; repeatRun = 0;
   log("Цель (голосом): " + cmd.goal + (cmd.extracted ? " — из фразы: «" + phrase + "»" : ""));
   speak("Веду к цели: " + cmd.goal);
   if (!navOn) startNav(false);
@@ -345,7 +346,6 @@ function encodeWav(chunks, srcRate) {
 
 async function startVlmListening() {
   if (listening) return;
-  stopBgListening();
   try { speechSynthesis.cancel(); } catch (e) {}
   listening = true;
   btnMic.classList.add("listening");
@@ -354,7 +354,6 @@ async function startVlmListening() {
     listening = false;
     btnMic.classList.remove("listening");
     btnMic.textContent = "🎤 Цель голосом";
-    setTimeout(startBgListening, 400);
   };
   let stream = null, proc = null, src = null;
   try {
@@ -418,91 +417,167 @@ document.addEventListener("click", (e) => {
   startListening();
 });
 
-// ===== ПОСТОЯННЫЙ СЛУХ: фоновое распознавание, цель можно сказать без касаний =====
-// Отличие от tap-сессии: TTS НЕ глушится (флаг listening не ставится), поэтому нужен
-// эхо-фильтр — иначе телефон услышит собственные команды («…остановись» → стоп).
-// опт-ин: непрерывный микрофон + камера подвешивают iPhone (полевой тест 2026-07-08),
-// поэтому по умолчанию выключено — включается кнопкой (заодно это user gesture для iOS)
-let alwaysListen = false;
-try { alwaysListen = localStorage.getItem("povodyr_ears") === "on"; } catch (e) {}
-let bgRec = null, bgActive = false;
+// ===== ПОСТОЯННЫЙ СЛУХ «КАК В ЗВОНКЕ» =====
+// Один аудиопоток открыт ВСЁ время — никаких стартов/стопов аудиосессий (они и лагали телефон).
+// Фразы нарезаются из потока по тишине (VAD на RMS), расшифровка — vision-модель через /api/vlm.
+// TTS не глушится, поэтому эхо-фильтр: пока говорим сами (+700мс) — сэмплы выбрасываются.
+let alwaysListen = true;
+try { alwaysListen = localStorage.getItem("povodyr_ears") !== "off"; } catch (e) {}
 let lastTtsText = "", lastTtsEndAt = 0;
 const btnEars = document.getElementById("btnEars");
 
 function looksLikeEcho(phrase) {
-  if (speechSynthesis.speaking || speechSynthesis.pending) return true;
-  if (performance.now() - lastTtsEndAt < 1200) return true;
-  // больше половины значимых слов совпало с последней озвученной фразой — это эхо
-  const pw = phrase.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-  const tw = new Set(lastTtsText.toLowerCase().split(/\s+/));
+  // больше половины значимых слов совпало с последней озвученной фразой — это эхо.
+  // пунктуацию чистим с ОБЕИХ сторон: «стоп,» ≠ «стоп» ломало фильтр (ревью 2026-07-08)
+  const norm = (s) => s.toLowerCase().replace(/[.,!?…«»]+/g, " ").split(/\s+/).filter(Boolean);
+  const pw = norm(phrase).filter(w => w.length > 3);
+  const tw = new Set(norm(lastTtsText));
   return pw.length > 0 && pw.filter(w => tw.has(w)).length / pw.length > 0.5;
 }
 
-// сессии SR на iOS могут умирать мгновенно — без бэкоффа рестарт-цикл душит страницу
-let bgDeaths = [];      // отметки быстрых смертей сессии
-let bgStartedAt = 0;
-function bgRestartDelay() {
-  const now = performance.now();
-  bgDeaths = bgDeaths.filter(t => now - t < 30000);
-  if (bgDeaths.length >= 6) return -1;            // слух не живёт на этом устройстве
-  return Math.min(400 * Math.pow(2, bgDeaths.length), 8000); // 400мс → 8с
+let earStream = null, earCtx = null, earSrc = null, earProc = null;
+let earSeg = [], earPre = [], earVoiced = false, earVoicedMs = 0, earSilenceMs = 0;
+let sttBusy = false;
+let tapBuf = null; // окно принудительной записи после касания (свободная фраза разрешена)
+
+const VAD_RMS = 0.02;     // порог голоса
+const VAD_END_MS = 800;   // тишина, завершающая фразу
+const VAD_MIN_MS = 350;   // короче — щелчок/шум, не речь
+const VAD_MAX_MS = 8000;  // принудительная отсечка
+
+async function startCallMic() {
+  if (earStream || !alwaysListen) return;
+  try {
+    earStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    alwaysListen = false;
+    updateEarsBtn();
+    log("Слух не включился: " + e.name, "err");
+    speak("Микрофон недоступен. Коснитесь экрана, чтобы сказать цель.");
+    return;
+  }
+  const track = earStream.getAudioTracks()[0];
+  if (track) track.onended = () => { stopCallMic(); }; // систему убило мик — оживим на visible
+  if (!earCtx) earCtx = new (window.AudioContext || window.webkitAudioContext)();
+  try { await earCtx.resume(); } catch (e) {}
+  earSrc = earCtx.createMediaStreamSource(earStream);
+  earProc = earCtx.createScriptProcessor(4096, 1, 1);
+  earProc.onaudioprocess = onEarAudio;
+  earSrc.connect(earProc);
+  earProc.connect(earCtx.destination);
+  log("🎙 Слух включён: микрофон работает постоянно, как в звонке");
 }
-function startBgListening() {
-  if (!SR || !alwaysListen || bgActive || listening || btnMic.disabled) return;
-  if (document.visibilityState !== "visible") return; // свёрнутая страница не слушает
-  if (speechSynthesis.speaking) { setTimeout(startBgListening, 600); return; } // не рвать речь стартом мика
-  const rec = new SR();
-  bgRec = rec;
-  bgActive = true;
-  bgStartedAt = performance.now();
-  rec.lang = "ru-RU";
-  rec.continuous = true;
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
-  rec.onresult = (e) => {
-    const r = e.results[e.results.length - 1];
-    const phrase = (r && r[0] ? r[0].transcript : "").trim();
-    if (!phrase) return;
-    if (looksLikeEcho(phrase)) { log("🎙 эхо: «" + phrase + "»"); return; }
+
+function stopCallMic() {
+  try { if (earProc) { earProc.onaudioprocess = null; earProc.disconnect(); } } catch (e) {}
+  try { if (earSrc) earSrc.disconnect(); } catch (e) {}
+  try { if (earStream) earStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  earStream = null; earSrc = null; earProc = null;
+  earSeg = []; earPre = []; earVoiced = false; earVoicedMs = 0; earSilenceMs = 0; tapBuf = null;
+}
+
+function onEarAudio(e) {
+  const data = e.inputBuffer.getChannelData(0);
+  const blockMs = (data.length / earCtx.sampleRate) * 1000;
+  if (tapBuf) { tapBuf.push(new Float32Array(data)); return; } // окно касания пишет всё подряд
+  // пока говорим сами (и чуть после) — глухи: телефон не должен слышать сам себя
+  if (listening || speechSynthesis.speaking || performance.now() - lastTtsEndAt < 700) {
+    earSeg = []; earVoiced = false; earVoicedMs = 0;
+    return;
+  }
+  let sum = 0;
+  for (let i = 0; i < data.length; i += 4) sum += data[i] * data[i];
+  const rms = Math.sqrt(sum / (data.length / 4));
+  if (rms > VAD_RMS) {
+    if (!earVoiced) { earSeg = earPre.slice(); earVoiced = true; earVoicedMs = 0; } // прероллинг: не резать начало слова
+    earSeg.push(new Float32Array(data));
+    earVoicedMs += blockMs;
+    earSilenceMs = 0;
+    if (earVoicedMs > VAD_MAX_MS) finishSegment();
+  } else {
+    if (earVoiced) {
+      earSeg.push(new Float32Array(data));
+      earSilenceMs += blockMs;
+      if (earSilenceMs > VAD_END_MS) finishSegment();
+    } else {
+      earPre.push(new Float32Array(data));
+      if (earPre.length > 3) earPre.shift();
+    }
+  }
+}
+
+function finishSegment() {
+  const seg = earSeg, vm = earVoicedMs;
+  earSeg = []; earVoiced = false; earVoicedMs = 0; earSilenceMs = 0;
+  if (vm < VAD_MIN_MS) return;
+  if (sttBusy) { log("🎙 фраза пропущена: распознаю предыдущую"); return; }
+  transcribeSegment(seg, false);
+}
+
+async function transcribeSegment(chunks, allowFree) {
+  sttBusy = true;
+  try {
+    const b64 = encodeWav(chunks, earCtx.sampleRate);
+    const resp = await fetch("/api/vlm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      body: JSON.stringify({
+        model: MODEL,
+        response_format: { type: "json_object" },
+        max_tokens: 80,
+        messages: [
+          { role: "system", content: "В аудио — короткая фраза по-русски (команда навигатора для незрячих). Расшифруй её дословно. Если внятной речи нет — пустая строка. Отвечай ТОЛЬКО JSON: {\"transcript\": string}" },
+          { role: "user", content: [
+            { type: "text", text: "Расшифруй фразу." },
+            { type: "input_audio", input_audio: { data: b64, format: "wav" } },
+          ]},
+        ],
+      }),
+    });
+    const data = await resp.json();
+    const parsed = tolerantParse(data.choices?.[0]?.message?.content || "");
+    const phrase = (parsed && parsed.transcript || "").trim();
+    if (!phrase) {
+      if (allowFree) speak("Не расслышал. Коснитесь экрана и повторите.");
+      return;
+    }
+    if (!allowFree && looksLikeEcho(phrase)) { log("🎙 эхо: «" + phrase + "»"); return; }
     const cmd = parseVoiceCommand(phrase);
-    // фоновый слух действует только на УВЕРЕННЫЕ команды: стоп/описание/темп/«дойти до X»;
-    // свободная фраза без глагола цели — только через касание экрана
-    if (cmd.type === "unclear" || (cmd.type === "goal" && !cmd.extracted)) {
+    // фоновый слух действует только на УВЕРЕННЫЕ команды; свободная фраза — через касание
+    if (!allowFree && (cmd.type === "unclear" || (cmd.type === "goal" && !cmd.extracted))) {
       log("🎙 фон: «" + phrase + "»");
       return;
     }
     log("🎙 услышал: «" + phrase + "»");
     handleVoiceCommand(cmd, phrase);
-  };
-  rec.onerror = (e) => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      alwaysListen = false; // без доступа к микрофону не рестартуем бесконечно
-      updateEarsBtn();
-      log("Постоянный слух выключен: нет доступа к микрофону", "err");
-    }
-  };
-  rec.onend = () => { // сессии SR смертны (тишина/лимит) — перезапускаем с бэкоффом
-    bgActive = false;
-    if (!alwaysListen || listening) return;
-    if (performance.now() - bgStartedAt < 2000) bgDeaths.push(performance.now());
-    const delay = bgRestartDelay();
-    if (delay < 0) { // 6 быстрых смертей за 30с: постоянный слух этому браузеру не по силам
-      alwaysListen = false;
-      updateEarsBtn();
-      log("Постоянный слух отключён: браузер не держит сессию. Работает касание экрана.", "err");
-      speak("Постоянный слух недоступен. Коснитесь экрана, чтобы сказать цель.");
-      return;
-    }
-    setTimeout(startBgListening, delay);
-  };
-  try { rec.start(); } catch (e) { bgActive = false; }
+  } catch (e) {
+    log("Слух: ошибка расшифровки: " + e.message, "err");
+    if (allowFree) speak("Не расслышал, попробуйте ещё раз.");
+  } finally {
+    sttBusy = false;
+  }
 }
 
-function stopBgListening() {
-  if (!bgRec) return;
-  try { bgRec.onend = null; bgRec.onresult = null; bgRec.onerror = null; bgRec.stop(); } catch (e) {}
-  bgRec = null;
-  bgActive = false;
+// касание при живом мике: НЕ создаём новую аудиосессию — пишем 4с из того же потока
+function tapListen() {
+  if (listening) return;
+  try { speechSynthesis.cancel(); } catch (e) {}
+  listening = true;
+  btnMic.classList.add("listening");
+  btnMic.textContent = "🎤 Говорите...";
+  try { navigator.vibrate && navigator.vibrate([40]); } catch (e) {}
+  tapBuf = [];
+  setTimeout(() => {
+    const seg = tapBuf;
+    tapBuf = null;
+    listening = false;
+    btnMic.classList.remove("listening");
+    btnMic.textContent = "🎤 Цель голосом";
+    if (seg && seg.length) transcribeSegment(seg, true);
+  }, 4000);
 }
 
 function updateEarsBtn() {
@@ -512,8 +587,8 @@ btnEars.onclick = () => {
   alwaysListen = !alwaysListen;
   try { localStorage.setItem("povodyr_ears", alwaysListen ? "on" : "off"); } catch (e) {}
   updateEarsBtn();
-  if (alwaysListen) { bgDeaths = []; startBgListening(); speak("Постоянный слух включён"); }
-  else { stopBgListening(); speak("Постоянный слух выключен"); }
+  if (alwaysListen) { startCallMic(); speak("Слух включён. Говорите в любой момент."); }
+  else { stopCallMic(); speak("Слух выключен. Коснитесь экрана, чтобы сказать цель."); }
 };
 updateEarsBtn();
 
@@ -521,6 +596,7 @@ goalEl.addEventListener("change", () => {
   history = [];
   arrivedStreak = 0; // недобранный arrived старой цели не должен засчитаться новой
   goalEpoch++;
+  lastSpoken = ""; repeatRun = 0;
   log("Цель изменена: " + (goalText() || "(пусто — режим описания)"));
 });
 
@@ -605,9 +681,10 @@ function handleResult(parsed, raw, ms) {
   lastSpoken = parsed.instruction;
   vibrate(parsed.direction, parsed.hazard); // вибрация — канал безопасности, её не подавляем
   bigCmd.textContent = parsed.instruction;
-  if (isRepeat && repeatRun % 3 !== 0) {
-    // ту же фразу озвучиваем лишь каждый третий раз — иначе спам в уши
-    log(`[${ms}ms] повтор подавлен: ${parsed.instruction}`, parsed.hazard ? "haz" : "lat");
+  if (isRepeat && repeatRun % 3 !== 0 && !parsed.hazard) {
+    // ту же фразу озвучиваем лишь каждый третий раз — но ОПАСНОСТЬ звучит всегда:
+    // на iOS вибрации нет, тишина при hazard читается как «путь свободен» (ревью)
+    log(`[${ms}ms] повтор подавлен: ${parsed.instruction}`, "lat");
   } else {
     // опасность перебивает текущую фразу сразу; обычная команда ждёт её конца в pendingSpeak
     if (parsed.hazard || (!speechSynthesis.speaking && !speechSynthesis.pending)) {
@@ -632,6 +709,7 @@ function handleResult(parsed, raw, ms) {
       history = [];
       arrivedStreak = 0;
       goalEpoch++;
+      lastSpoken = ""; repeatRun = 0;
       speak("Цель достигнута! Описываю, что впереди.");
     }
   } else {
@@ -648,10 +726,9 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     if (navOn) keepAwake();
     try { cam.play(); } catch (e) {} // страховка от замороженного видео после сворачивания
-    bgDeaths = []; // после разворота даём слуху чистый счёт
-    setTimeout(startBgListening, 1500);
-  } else {
-    stopBgListening(); // в фоне микрофон не держим
+    // мик-звонок мог быть убит системой в фоне — оживляем
+    try { earCtx && earCtx.resume(); } catch (e) {}
+    if (alwaysListen && !btnMic.disabled) startCallMic();
   }
 });
 
