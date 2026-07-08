@@ -81,6 +81,7 @@ function log(msg, cls) {
   if (cls) d.className = cls;
   d.textContent = msg;
   logEl.prepend(d);
+  while (logEl.childNodes.length > 60) logEl.removeChild(logEl.lastChild); // DOM не пухнет за долгую сессию
 }
 
 // ===== КАМЕРА =====
@@ -109,21 +110,21 @@ document.getElementById("btnStart").onclick = async () => {
       ? "Камера включена. Веду к цели: " + goalText()
       : "Камера включена. Описываю, что впереди. Скажите, куда вести — я слушаю.");
     if (!navOn) startNav(false);
-    startBgListening(); // постоянный слух: цель можно сказать без касаний
+    setTimeout(startBgListening, 2500); // слух — после того как камера и вступительная речь устаканятся
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
   }
 };
 
 // ===== КАДР: downscale 768px, JPEG 0.6, data-URI =====
+const frameCanvas = document.createElement("canvas"); // один canvas на все тики — меньше GC на телефоне
 function captureFrame() {
   if (!cam.videoWidth) return null; // метаданные ещё не загружены
   const w = 768;
   const h = Math.round(cam.videoHeight * (w / cam.videoWidth));
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  c.getContext("2d").drawImage(cam, 0, 0, w, h);
-  return c.toDataURL("image/jpeg", 0.6);
+  frameCanvas.width = w; frameCanvas.height = h;
+  frameCanvas.getContext("2d").drawImage(cam, 0, 0, w, h);
+  return frameCanvas.toDataURL("image/jpeg", 0.6);
 }
 
 // ===== ГОЛОС =====
@@ -304,11 +305,23 @@ function looksLikeEcho(phrase) {
   return pw.length > 0 && pw.filter(w => tw.has(w)).length / pw.length > 0.5;
 }
 
+// сессии SR на iOS могут умирать мгновенно — без бэкоффа рестарт-цикл душит страницу
+let bgDeaths = [];      // отметки быстрых смертей сессии
+let bgStartedAt = 0;
+function bgRestartDelay() {
+  const now = performance.now();
+  bgDeaths = bgDeaths.filter(t => now - t < 30000);
+  if (bgDeaths.length >= 6) return -1;            // слух не живёт на этом устройстве
+  return Math.min(400 * Math.pow(2, bgDeaths.length), 8000); // 400мс → 8с
+}
 function startBgListening() {
   if (!SR || !alwaysListen || bgActive || listening || btnMic.disabled) return;
+  if (document.visibilityState !== "visible") return; // свёрнутая страница не слушает
+  if (speechSynthesis.speaking) { setTimeout(startBgListening, 600); return; } // не рвать речь стартом мика
   const rec = new SR();
   bgRec = rec;
   bgActive = true;
+  bgStartedAt = performance.now();
   rec.lang = "ru-RU";
   rec.continuous = true;
   rec.interimResults = false;
@@ -335,9 +348,19 @@ function startBgListening() {
       log("Постоянный слух выключен: нет доступа к микрофону", "err");
     }
   };
-  rec.onend = () => { // сессии SR смертны (тишина/лимит) — перезапускаем, пока слух включён
+  rec.onend = () => { // сессии SR смертны (тишина/лимит) — перезапускаем с бэкоффом
     bgActive = false;
-    if (alwaysListen && !listening) setTimeout(startBgListening, 400);
+    if (!alwaysListen || listening) return;
+    if (performance.now() - bgStartedAt < 2000) bgDeaths.push(performance.now());
+    const delay = bgRestartDelay();
+    if (delay < 0) { // 6 быстрых смертей за 30с: постоянный слух этому браузеру не по силам
+      alwaysListen = false;
+      updateEarsBtn();
+      log("Постоянный слух отключён: браузер не держит сессию. Работает касание экрана.", "err");
+      speak("Постоянный слух недоступен. Коснитесь экрана, чтобы сказать цель.");
+      return;
+    }
+    setTimeout(startBgListening, delay);
   };
   try { rec.start(); } catch (e) { bgActive = false; }
 }
@@ -356,7 +379,7 @@ btnEars.onclick = () => {
   alwaysListen = !alwaysListen;
   try { localStorage.setItem("povodyr_ears", alwaysListen ? "on" : "off"); } catch (e) {}
   updateEarsBtn();
-  if (alwaysListen) { startBgListening(); speak("Постоянный слух включён"); }
+  if (alwaysListen) { bgDeaths = []; startBgListening(); speak("Постоянный слух включён"); }
   else { stopBgListening(); speak("Постоянный слух выключен"); }
 };
 updateEarsBtn();
@@ -486,6 +509,10 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     if (navOn) keepAwake();
     try { cam.play(); } catch (e) {} // страховка от замороженного видео после сворачивания
+    bgDeaths = []; // после разворота даём слуху чистый счёт
+    setTimeout(startBgListening, 1500);
+  } else {
+    stopBgListening(); // в фоне микрофон не держим
   }
 });
 
