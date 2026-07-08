@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Поводырь</title>
+<link rel="icon" href="data:,">
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #111; color: #eee; }
   video { width: 100%; max-width: 480px; background: #000; border-radius: 8px; }
@@ -198,6 +199,14 @@ function handleResult(parsed, raw, ms) {
   return true;
 }
 
+// ===== WAKE LOCK: экран не должен гаснуть, пока телефон на груди =====
+async function keepAwake() {
+  try { await navigator.wakeLock.request("screen"); } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && navOn) keepAwake();
+});
+
 // ===== M3: ЦИКЛ НАВИГАЦИИ — строго один запрос в полёте =====
 let navOn = false;
 let busy = false;
@@ -217,6 +226,7 @@ btnNav.onclick = () => {
   btnNav.textContent = "Стоп";
   btnNav.classList.add("stop");
   speak("Навигация запущена");
+  keepAwake();
   tick();
 };
 
