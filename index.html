@@ -54,6 +54,16 @@
   #btnMic.listening { background: var(--ink); color: #fff; border-color: var(--ink);
     box-shadow: 0 0 0 0 rgba(29,29,31,.4); animation: sentio-pulse 1.4s infinite; }
   @keyframes sentio-pulse { 0%{box-shadow:0 0 0 0 rgba(29,29,31,.4)} 70%{box-shadow:0 0 0 18px rgba(29,29,31,0)} 100%{box-shadow:0 0 0 0 rgba(29,29,31,0)} }
+  /* монохромные SVG-иконки вместо эмодзи: маска + currentColor → цвет наследуется от кнопки (ink/белый) */
+  #btnMic::before, #btnEars::before { content: ""; display: inline-block; background: currentColor;
+    vertical-align: -0.18em; margin-right: 8px; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+    -webkit-mask-position: center; mask-position: center; -webkit-mask-size: contain; mask-size: contain; }
+  #btnMic::before { width: 18px; height: 18px;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%202a3%203%200%200%200-3%203v6a3%203%200%200%200%206%200V5a3%203%200%200%200-3-3z%22%2F%3E%3Cpath%20d%3D%22M6%2010a1%201%200%200%201%202%200%204%204%200%200%200%208%200%201%201%200%200%201%202%200%206%206%200%200%201-5%205.91V19h2a1%201%200%201%201%200%202H9a1%201%200%201%201%200-2h2v-3.09A6%206%200%200%201%206%2010z%22%2F%3E%3C%2Fsvg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%202a3%203%200%200%200-3%203v6a3%203%200%200%200%206%200V5a3%203%200%200%200-3-3z%22%2F%3E%3Cpath%20d%3D%22M6%2010a1%201%200%200%201%202%200%204%204%200%200%200%208%200%201%201%200%200%201%202%200%206%206%200%200%201-5%205.91V19h2a1%201%200%201%201%200%202H9a1%201%200%201%201%200-2h2v-3.09A6%206%200%200%201%206%2010z%22%2F%3E%3C%2Fsvg%3E"); }
+  #btnEars::before { width: 15px; height: 15px; margin-right: 6px; vertical-align: -0.12em;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2211.8%22%20y%3D%223%22%20width%3D%222.4%22%20height%3D%2218%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2216.6%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2221%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3C%2Fsvg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2211.8%22%20y%3D%223%22%20width%3D%222.4%22%20height%3D%2218%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2216.6%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2221%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3C%2Fsvg%3E"); }
   /* отладочные инструменты — свёрнуты и приглушены, обычному пользователю не нужны */
   details.dev { margin-top: 24px; }
   details.dev > summary { font-size: 13px; color: var(--faint); cursor: pointer; list-style: none;
@@ -99,14 +109,14 @@
 <!-- Цель: коснись экрана и скажи, либо впиши -->
 <label for="goal">Коснись экрана и скажи, куда идти — «хочу дойти до …». Или впиши цель ниже. Команды голосом: «стоп», «что вокруг», «быстрее / медленнее».</label>
 <input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
-<button id="btnMic" disabled aria-label="Сказать цель голосом">🎤 Сказать цель</button>
+<button id="btnMic" disabled aria-label="Сказать цель голосом">Сказать цель</button>
 
 <!-- Служебные кнопки — обычному пользователю не нужны, приложение voice-first -->
 <details class="dev" onclick="event.stopPropagation()">
   <summary>Инструменты отладки</summary>
   <div class="dev-row">
     <button id="btnNav" disabled>Навигация</button>
-    <button id="btnEars" disabled aria-label="Постоянное прослушивание команд">🎙 Слух: вкл</button>
+    <button id="btnEars" disabled aria-label="Постоянное прослушивание команд">Слух: вкл</button>
     <button id="btnShot" disabled>Один кадр</button>
     <button id="btnShootout" disabled>Шутаут</button>
   </div>
@@ -217,7 +227,7 @@ function speakNow(text) {
   if (!muteWarned) setTimeout(() => {
     if (!speechEverStarted && speechAttempts >= 2) {
       muteWarned = true;
-      bigCmd.textContent = "🔇 Речь не слышна? Выключи беззвучный режим!";
+      bigCmd.textContent = "Речь не слышна? Выключи беззвучный режим!";
       log("РЕЧЬ НЕ ВОСПРОИЗВОДИТСЯ — проверь беззвучный режим и громкость", "err");
     }
   }, 2000);
@@ -276,7 +286,7 @@ function startListening() {
   try { speechSynthesis.cancel(); } catch (e) {}
   listening = true;
   btnMic.classList.add("listening");
-  btnMic.textContent = "🎤 Слушаю...";
+  btnMic.textContent = "Слушаю...";
   const rec = new SR();
   rec.lang = "ru-RU";
   rec.interimResults = false;
@@ -284,7 +294,7 @@ function startListening() {
   const done = () => {
     listening = false;
     btnMic.classList.remove("listening");
-    btnMic.textContent = "🎤 Цель голосом";
+    btnMic.textContent = "Сказать цель";
     setTimeout(startBgListening, 400); // вернуть фоновый слух после tap-сессии
   };
   rec.onresult = (e) => {
@@ -419,7 +429,7 @@ function stopBgListening() {
 }
 
 function updateEarsBtn() {
-  btnEars.textContent = alwaysListen ? "🎙 Слух: вкл" : "🎙 Слух: выкл";
+  btnEars.textContent = alwaysListen ? "Слух: вкл" : "Слух: выкл";
 }
 btnEars.onclick = () => {
   alwaysListen = !alwaysListen;
