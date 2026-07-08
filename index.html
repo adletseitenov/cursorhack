@@ -64,8 +64,8 @@
   #btnEars::before { width: 15px; height: 15px; margin-right: 6px; vertical-align: -0.12em;
     -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2211.8%22%20y%3D%223%22%20width%3D%222.4%22%20height%3D%2218%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2216.6%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2221%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3C%2Fsvg%3E");
     mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2211.8%22%20y%3D%223%22%20width%3D%222.4%22%20height%3D%2218%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2216.6%22%20y%3D%227%22%20width%3D%222.4%22%20height%3D%2210%22%20rx%3D%221.2%22%2F%3E%3Crect%20x%3D%2221%22%20y%3D%2210%22%20width%3D%222.4%22%20height%3D%224%22%20rx%3D%221.2%22%2F%3E%3C%2Fsvg%3E"); }
-  /* отладочные инструменты — свёрнуты и приглушены, обычному пользователю не нужны */
-  details.dev { margin-top: 24px; }
+  /* дев-кнопки убраны — чистый consumer-вид. Элементы остаются в DOM (JS завязан на их id). */
+  details.dev { display: none; }
   details.dev > summary { font-size: 13px; color: var(--faint); cursor: pointer; list-style: none;
     padding: 6px 0; user-select: none; }
   details.dev > summary::-webkit-details-marker { display: none; }
@@ -78,6 +78,10 @@
   /* judge view — служебная консоль для зрячих отладчиков */
   #judge { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 22px; padding-top: 18px;
     border-top: 1px solid var(--line); }
+  /* judge view пуст до старта → скрываем, чтобы стартовый экран был чистым consumer.
+     Появляется сам, когда есть кадр или лог (во время навигации — для судей). */
+  #lastFrame:not([src]) { display: none; }
+  #judge:not(:has(#log div)):not(:has(#lastFrame[src])) { display: none; }
   #lastFrame { width: 220px; max-width: 100%; border-radius: 12px; background: #000; border: 1px solid var(--line); }
   #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.55;
     flex: 1; min-width: 240px; max-height: 320px; overflow-y: auto; color: var(--grey); }
