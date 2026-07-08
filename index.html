@@ -20,12 +20,13 @@
   }
   header { display: flex; align-items: center; margin: 2px 0 18px; }
   header svg { height: 34px; width: auto; }
-  video { width: 100%; background: #000; border-radius: 16px; display: block; margin: 4px 0 14px;
-    border: 1px solid var(--line); }
-  /* живая команда — самый важный элемент, крупно */
+  video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; max-height: 44vh; background: #000;
+    border-radius: 16px; display: block; margin: 4px 0 0; border: 1px solid var(--line); }
+  /* живая команда — самый важный элемент, крупно. Пусто → скрыто, чтобы не зияла дыра до старта. */
   #bigCmd { font-size: clamp(28px,7vw,40px); font-weight: 640; letter-spacing: -.02em; line-height: 1.14;
-    min-height: 46px; margin: 14px 0 6px; color: var(--ink); text-wrap: balance; }
-  #status { font-size: 15px; color: var(--grey); font-weight: 450; min-height: 20px; }
+    margin: 18px 0 4px; color: var(--ink); text-wrap: balance; }
+  #status { font-size: 15px; color: var(--grey); font-weight: 450; }
+  #bigCmd:empty, #status:empty { display: none; }
   label { font-size: 14px; color: var(--grey); display: block; margin: 16px 0 7px; line-height: 1.42; }
   input {
     font: inherit; font-size: 17px; padding: 13px 15px; border-radius: 12px;
@@ -42,14 +43,28 @@
   }
   button:active { transform: scale(.97); }
   button:disabled { border-color: var(--line); color: var(--faint); background: #fff; }
-  #btnStart, #btnMic { background: var(--ink); color: #fff; }
-  #btnStart:disabled, #btnMic:disabled { background: #fff; color: var(--faint); border-color: var(--line); }
+  /* первичная кнопка и mic — на всю ширину, стопкой; чёткая иерархия */
+  #btnStart, #btnMic { display: block; width: 100%; margin: 16px 0 0; }
+  #btnStart { background: var(--ink); color: #fff; }
+  #btnStart:disabled { background: #fff; color: var(--faint); border-color: var(--line); }
+  #btnMic { font-size: 17px; margin-top: 10px; }
+  #btnMic:disabled { color: var(--faint); border-color: var(--line); }
   button.stop { background: var(--ink); color: #fff; }
-  #btnMic { font-size: 18px; }
-  /* слушаем — инверсия + пульс (видимое состояние без цвета) */
-  #btnMic.listening { background: #fff; color: var(--ink); border-color: var(--ink);
-    box-shadow: 0 0 0 0 rgba(29,29,31,.35); animation: sentio-pulse 1.4s infinite; }
-  @keyframes sentio-pulse { 0%{box-shadow:0 0 0 0 rgba(29,29,31,.35)} 70%{box-shadow:0 0 0 16px rgba(29,29,31,0)} 100%{box-shadow:0 0 0 0 rgba(29,29,31,0)} }
+  /* слушаем — инверсия в чёрное + пульс (видимое состояние записи без цвета) */
+  #btnMic.listening { background: var(--ink); color: #fff; border-color: var(--ink);
+    box-shadow: 0 0 0 0 rgba(29,29,31,.4); animation: sentio-pulse 1.4s infinite; }
+  @keyframes sentio-pulse { 0%{box-shadow:0 0 0 0 rgba(29,29,31,.4)} 70%{box-shadow:0 0 0 18px rgba(29,29,31,0)} 100%{box-shadow:0 0 0 0 rgba(29,29,31,0)} }
+  /* отладочные инструменты — свёрнуты и приглушены, обычному пользователю не нужны */
+  details.dev { margin-top: 24px; }
+  details.dev > summary { font-size: 13px; color: var(--faint); cursor: pointer; list-style: none;
+    padding: 6px 0; user-select: none; }
+  details.dev > summary::-webkit-details-marker { display: none; }
+  details.dev > summary::before { content: "▸  "; }
+  details.dev[open] > summary::before { content: "▾  "; }
+  .dev-row { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
+  .dev-row button { font-size: 13px; font-weight: 500; min-height: 40px; padding: 8px 14px;
+    border-radius: 9px; border: 1px solid var(--line); color: var(--grey); background: #fff; margin: 0; }
+  .dev-row button:disabled { color: var(--faint); border-color: var(--line); }
   /* judge view — служебная консоль для зрячих отладчиков */
   #judge { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 22px; padding-top: 18px;
     border-top: 1px solid var(--line); }
@@ -73,20 +88,30 @@
   <text x="78" y="62" font-family="-apple-system,'SF Pro Display','Helvetica Neue',Arial,sans-serif" font-size="54" font-weight="700" letter-spacing="-2" fill="#1d1d1f">Sentio</text>
 </svg></header>
 <video id="cam" playsinline autoplay muted aria-hidden="true"></video>
-<label for="goal">Цель (пусто — описываю, что впереди). Коснись экрана и скажи: «хочу дойти до …»; «стоп» — остановить; «что вокруг» — снова описание; «говори быстрее/медленнее» — темп:</label>
-<input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
-<div>
-  <button id="btnStart" aria-label="Старт камеры и начало описания окружения">Старт камеры</button>
-  <button id="btnMic" disabled aria-label="Сказать цель голосом">🎤 Цель голосом</button>
-</div>
-<div>
-  <button id="btnNav" disabled>Навигация</button>
-  <button id="btnEars" disabled aria-label="Постоянное прослушивание команд">🎙 Слух: вкл</button>
-  <button id="btnShot" disabled>Один кадр</button>
-  <button id="btnShootout" disabled>Шутаут</button>
-</div>
+
+<!-- Живая команда — герой экрана. Пусто до старта → CSS скрывает, чтобы не зияла дыра. -->
 <div id="bigCmd"></div>
 <div id="status" aria-hidden="true"></div>
+
+<!-- Первичное действие -->
+<button id="btnStart" aria-label="Старт камеры и начало описания окружения">Старт камеры</button>
+
+<!-- Цель: коснись экрана и скажи, либо впиши -->
+<label for="goal">Коснись экрана и скажи, куда идти — «хочу дойти до …». Или впиши цель ниже. Команды голосом: «стоп», «что вокруг», «быстрее / медленнее».</label>
+<input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
+<button id="btnMic" disabled aria-label="Сказать цель голосом">🎤 Сказать цель</button>
+
+<!-- Служебные кнопки — обычному пользователю не нужны, приложение voice-first -->
+<details class="dev" onclick="event.stopPropagation()">
+  <summary>Инструменты отладки</summary>
+  <div class="dev-row">
+    <button id="btnNav" disabled>Навигация</button>
+    <button id="btnEars" disabled aria-label="Постоянное прослушивание команд">🎙 Слух: вкл</button>
+    <button id="btnShot" disabled>Один кадр</button>
+    <button id="btnShootout" disabled>Шутаут</button>
+  </div>
+</details>
+
 <!-- Judge view: что «видит» и «думает» модель — для зрячих отладчиков, скринридеру не нужен -->
 <div id="judge" aria-hidden="true">
   <img id="lastFrame" alt="">
