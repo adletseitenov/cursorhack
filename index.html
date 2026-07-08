@@ -11,6 +11,8 @@
   button { font-size: 18px; padding: 12px 20px; margin: 8px 8px 8px 0; border-radius: 8px; border: none; background: #2b6; color: #fff; }
   button:disabled { background: #555; }
   button.stop { background: #d43; }
+  #btnMic { font-size: 22px; padding: 16px 24px; background: #36c; }
+  #btnMic.listening { background: #c3a; }
   input { font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; width: 100%; max-width: 460px; box-sizing: border-box; }
   #bigCmd { font-size: 28px; font-weight: 700; min-height: 40px; margin: 8px 0; color: #6f6; }
   #judge { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
@@ -26,10 +28,13 @@
 <body>
 <h3 style="margin:4px 0">Поводырь</h3>
 <video id="cam" playsinline autoplay muted></video>
-<label>Цель:</label>
-<input id="goal" value="бутылка воды на столе">
+<label>Цель (пусто — описываю, что впереди):</label>
+<input id="goal" value="" placeholder="скажи цель кнопкой 🎤 или впиши сюда">
 <div>
   <button id="btnStart">Старт камеры</button>
+  <button id="btnMic" disabled>🎤 Цель голосом</button>
+</div>
+<div>
   <button id="btnNav" disabled>Навигация</button>
   <button id="btnShot" disabled>Один кадр</button>
   <button id="btnShootout" disabled>Шутаут</button>
@@ -44,30 +49,26 @@
 
 <script>
 // ===== КОНФИГ =====
-const OPENROUTER_KEY = ""; // ключ сюда; если пусто — страница спросит один раз и сохранит в localStorage
+// Ключ OpenRouter живёт на сервере (Netlify Function /api/vlm), в браузере его нет.
 const MODEL = "qwen/qwen3-vl-8b-instruct"; // дефолт до шутаута M2
 const SHOOTOUT_MODELS = [
   "qwen/qwen3-vl-8b-instruct",
   "z-ai/glm-4.6v",
   "anthropic/claude-haiku-4.5",
 ];
-const TICK_MS = 300; // пауза между ответом и следующим кадром (рычаг M4)
-
-function getKey() {
-  if (OPENROUTER_KEY) return OPENROUTER_KEY;
-  let k = localStorage.getItem("orkey");
-  if (!k) {
-    k = prompt("OpenRouter API key:");
-    if (k) localStorage.setItem("orkey", k.trim());
-  }
-  return k;
-}
+const TICK_MS = 300;        // пауза между ответом и следующим кадром (рычаг M4)
+const FETCH_TIMEOUT = 15000; // зависший запрос не должен останавливать цикл
 
 const cam = document.getElementById("cam");
 const logEl = document.getElementById("log");
 const statusEl = document.getElementById("status");
 const bigCmd = document.getElementById("bigCmd");
 const lastFrameEl = document.getElementById("lastFrame");
+const goalEl = document.getElementById("goal");
+const btnNav = document.getElementById("btnNav");
+const btnMic = document.getElementById("btnMic");
+
+function goalText() { return goalEl.value.trim(); }
 
 function log(msg, cls) {
   const d = document.createElement("div");
@@ -84,8 +85,14 @@ document.getElementById("btnStart").onclick = async () => {
       audio: false,
     });
     cam.srcObject = stream;
-    for (const id of ["btnNav", "btnShot", "btnShootout"]) document.getElementById(id).disabled = false;
-    speak("Камера включена");
+    const track = stream.getVideoTracks()[0];
+    track.onended = () => { // камеру забрало другое приложение / система
+      log("Камера потеряна (трек завершён)", "err");
+      speak("Камера потеряна. Перезапустите камеру.");
+      stopNav();
+    };
+    for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic"]) document.getElementById(id).disabled = false;
+    speak("Камера включена. Скажите цель или запустите навигацию.");
     log("Камера запущена");
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
@@ -94,6 +101,7 @@ document.getElementById("btnStart").onclick = async () => {
 
 // ===== КАДР: downscale 768px, JPEG 0.6, data-URI =====
 function captureFrame() {
+  if (!cam.videoWidth) return null; // метаданные ещё не загружены
   const w = 768;
   const h = Math.round(cam.videoHeight * (w / cam.videoWidth));
   const c = document.createElement("canvas");
@@ -103,13 +111,37 @@ function captureFrame() {
 }
 
 // ===== ГОЛОС =====
+let listening = false; // пока слушаем микрофон — молчим, иначе телефон услышит сам себя
+let lastU = null;      // глобальная ссылка: GC убивает локальный utterance до озвучки
+let speechEverStarted = false, speechAttempts = 0, muteWarned = false;
+function speakNow(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ru-RU";
+  u.rate = 1.2;
+  u.onstart = () => { speechEverStarted = true; };
+  lastU = u;
+  speechSynthesis.speak(u);
+  speechSynthesis.resume(); // Chrome иногда остаётся в paused после сворачивания
+  // сторожок: iOS mute switch глушит speechSynthesis молча — речь единственный канал
+  speechAttempts++;
+  if (!muteWarned) setTimeout(() => {
+    if (!speechEverStarted && speechAttempts >= 2) {
+      muteWarned = true;
+      bigCmd.textContent = "🔇 Речь не слышна? Выключи беззвучный режим!";
+      log("РЕЧЬ НЕ ВОСПРОИЗВОДИТСЯ — проверь беззвучный режим и громкость", "err");
+    }
+  }, 2000);
+}
 function speak(text) {
+  if (listening) return;
   try {
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "ru-RU";
-    u.rate = 1.2;
-    speechSynthesis.speak(u);
+    if (speechSynthesis.speaking || speechSynthesis.pending) {
+      speechSynthesis.cancel();
+      // Android Chrome дропает утеранс, отправленный сразу после cancel()
+      setTimeout(() => { if (!listening) speakNow(text); }, 60);
+    } else {
+      speakNow(text); // первый вызов обязан быть синхронным из user gesture (iOS)
+    }
   } catch (e) { /* нет TTS — молчим */ }
 }
 
@@ -127,27 +159,68 @@ function vibrate(dir, hazard) {
   } catch (e) {}
 }
 
-// ===== VLM-ЗАПРОС =====
+// ===== STT: цель голосом =====
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+btnMic.onclick = () => {
+  if (!SR) { speak("Голосовой ввод недоступен, впишите цель в поле"); return; }
+  try { speechSynthesis.cancel(); } catch (e) {}
+  listening = true;
+  btnMic.classList.add("listening");
+  btnMic.textContent = "🎤 Слушаю...";
+  const rec = new SR();
+  rec.lang = "ru-RU";
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  const done = () => {
+    listening = false;
+    btnMic.classList.remove("listening");
+    btnMic.textContent = "🎤 Цель голосом";
+  };
+  rec.onresult = (e) => {
+    done();
+    const phrase = e.results[0][0].transcript.trim();
+    if (!phrase) return;
+    goalEl.value = phrase;
+    history = [];
+    log("Цель (голосом): " + phrase);
+    speak("Веду к цели: " + phrase);
+    if (!navOn) startNav(false);
+  };
+  rec.onerror = (e) => { done(); log("STT ошибка: " + e.error, "err"); speak("Не расслышал, повторите"); };
+  rec.onend = done;
+  rec.start();
+};
+
+goalEl.addEventListener("change", () => {
+  history = [];
+  log("Цель изменена: " + (goalText() || "(пусто — режим описания)"));
+});
+
+// ===== VLM-ЗАПРОС (через серверный прокси /api/vlm) =====
 let history = []; // последние 3 инструкции — против осцилляции лево/право
 
 function systemPrompt() {
-  const goal = document.getElementById("goal").value || "бутылка воды на столе";
+  const goal = goalText();
+  if (!goal) {
+    return `Ты — глаза незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
+      `Опиши ОДНОЙ фразой по-русски (максимум 10 слов), что перед ним. ` +
+      `Препятствия и опасности на пути называй В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущее описание без необходимости. ` +
+      `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": false}`;
+  }
   return `Ты — навигатор для незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
-    `Цель: ${goal}. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
+    `Его цель: «${goal}». Веди его к цели. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
     `Препятствия на пути — предупреждай В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущую команду без необходимости. ` +
-    `Когда цель в полуметре — arrived: true. ` +
+    `arrived: true ставь ТОЛЬКО когда цель занимает большую часть кадра и до неё меньше шага. ` +
     `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": bool}`;
 }
 
 async function askVLM(dataUri, model) {
   const t0 = performance.now();
   const histText = history.length ? ` Предыдущие команды (свежие последними): ${history.join("; ")}.` : "";
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const resp = await fetch("/api/vlm", {
     method: "POST",
-    headers: {
-      "Authorization": "Bearer " + getKey(),
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
     body: JSON.stringify({
       model: model,
       response_format: { type: "json_object" },
@@ -190,11 +263,16 @@ function handleResult(parsed, raw, ms) {
   log(`[${ms}ms] ${parsed.instruction} (${parsed.direction}${parsed.hazard ? ", ОПАСНОСТЬ" : ""})`, parsed.hazard ? "haz" : "lat");
   history.push(parsed.instruction);
   if (history.length > 3) history.shift();
-  if (parsed.arrived) {
-    speak(parsed.instruction + ". Цель достигнута!");
-    try { navigator.vibrate && navigator.vibrate([200, 100, 200, 100, 400]); } catch (e) {}
-    log("=== ЦЕЛЬ ДОСТИГНУТА ===", "haz");
-    stopNav();
+  if (parsed.arrived && goalText()) {
+    arrivedStreak++;
+    if (arrivedStreak >= 2) { // один ложный arrived не должен ронять навигацию
+      speak("Цель достигнута!");
+      try { navigator.vibrate && navigator.vibrate([200, 100, 200, 100, 400]); } catch (e) {}
+      log("=== ЦЕЛЬ ДОСТИГНУТА ===", "haz");
+      stopNav();
+    }
+  } else {
+    arrivedStreak = 0;
   }
   return true;
 }
@@ -204,13 +282,17 @@ async function keepAwake() {
   try { await navigator.wakeLock.request("screen"); } catch (e) {}
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && navOn) keepAwake();
+  if (document.visibilityState === "visible") {
+    if (navOn) keepAwake();
+    try { cam.play(); } catch (e) {} // страховка от замороженного видео после сворачивания
+  }
 });
 
-// ===== M3: ЦИКЛ НАВИГАЦИИ — строго один запрос в полёте =====
+// ===== ЦИКЛ НАВИГАЦИИ — строго один запрос в полёте =====
 let navOn = false;
 let busy = false;
-const btnNav = document.getElementById("btnNav");
+let errStreak = 0;     // подряд неудачных тиков: с 2-го — голосом «остановитесь»
+let arrivedStreak = 0; // arrived подтверждаем двумя тиками подряд
 
 function stopNav() {
   navOn = false;
@@ -219,37 +301,69 @@ function stopNav() {
   statusEl.textContent = "";
 }
 
-btnNav.onclick = () => {
-  if (navOn) { stopNav(); speak("Навигация остановлена"); return; }
+function startNav(announce = true) {
   navOn = true;
+  busy = false; // страховка от залипшего флага
   history = [];
+  errStreak = 0;
+  arrivedStreak = 0;
   btnNav.textContent = "Стоп";
   btnNav.classList.add("stop");
-  speak("Навигация запущена");
+  if (announce) speak(goalText() ? "Навигация запущена" : "Описываю, что впереди");
   keepAwake();
   tick();
+}
+
+btnNav.onclick = () => {
+  if (navOn) { stopNav(); speak("Навигация остановлена"); return; }
+  startNav();
 };
+
+// следующий тик — после паузы И конца текущей фразы (не обрывать речь на полуслове)
+function scheduleNext(delay) {
+  let waited = 0; // speechSynthesis.speaking может залипнуть — не ждать дольше 5 с
+  const next = () => {
+    if (!navOn || busy) return;
+    if ((speechSynthesis.speaking || listening) && waited < 5000) {
+      waited += 150;
+      setTimeout(next, 150);
+      return;
+    }
+    tick();
+  };
+  setTimeout(next, delay);
+}
 
 async function tick() {
   if (!navOn || busy) return;
   busy = true;
-  const frame = captureFrame(); // кадр снимается в момент отправки, не из буфера
-  lastFrameEl.src = frame;
   try {
+    const frame = captureFrame(); // кадр снимается в момент отправки, не из буфера
+    if (!frame) return;           // видео ещё не готово — finally перепланирует
+    lastFrameEl.src = frame;
     const { parsed, raw, ms } = await askVLM(frame, MODEL);
+    errStreak = 0;
+    if (!navOn) return; // «Стоп» нажали, пока запрос был в полёте — не озвучивать
     statusEl.textContent = `последний тик: ${ms}ms`;
     handleResult(parsed, raw, ms);
   } catch (e) {
-    log("Ошибка тика: " + e.message, "err");
+    errStreak++;
+    log(`Ошибка тика (${errStreak} подряд): ` + e.message, "err");
+    if (errStreak === 2 || errStreak === 10) {
+      speak("Связь потеряна. Остановитесь.");
+      try { navigator.vibrate && navigator.vibrate(VIBES.hazard); } catch (e2) {}
+    }
   } finally {
     busy = false;
-    if (navOn) setTimeout(tick, TICK_MS);
+    if (navOn) scheduleNext(errStreak ? 2000 : TICK_MS);
   }
 }
 
 // ===== один кадр (отладка) =====
 document.getElementById("btnShot").onclick = async () => {
+  if (navOn || busy) { log("Занято: идёт навигация", "err"); return; } // не ломать «один запрос в полёте»
   const frame = captureFrame();
+  if (!frame) { log("Видео ещё не готово", "err"); return; }
   lastFrameEl.src = frame;
   statusEl.textContent = "Запрос...";
   try {
@@ -264,7 +378,9 @@ document.getElementById("btnShot").onclick = async () => {
 
 // ===== M2: латенси-шутаут — один кадр по всем кандидатам =====
 document.getElementById("btnShootout").onclick = async () => {
+  if (navOn || busy) { log("Занято: идёт навигация", "err"); return; }
   const frame = captureFrame();
+  if (!frame) { log("Видео ещё не готово", "err"); return; }
   lastFrameEl.src = frame;
   log("=== ШУТАУТ: один кадр → " + SHOOTOUT_MODELS.length + " моделей ===");
   for (const m of SHOOTOUT_MODELS) {
