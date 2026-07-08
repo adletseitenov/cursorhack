@@ -24,14 +24,24 @@ VLM анализирует кадры в реальном времени и ве
 
 ## Стек
 
-Один файл `index.html`, vanilla JS, без сборки и бэкенда.
-Камера → canvas → base64 → OpenRouter (`qwen/qwen3-vl-8b-instruct`) → Web Speech + Vibration API.
+Фронт: один файл `index.html`, vanilla JS, без сборки.
+Бэкенд: одна Netlify Function `/api/vlm` — прокси к OpenRouter (ключ в env, не в браузере).
+Камера → canvas → base64 → `/api/vlm` → VLM → Web Speech (голос) + Vibration API +
+webkitSpeechRecognition (цель голосом).
+
+## Выбор модели (замер через боевой прокси, один кадр 768px)
+
+| Модель | Латенси (тёплая) | Ответ |
+|---|---|---|
+| **qwen/qwen3-vl-8b-instruct** | **~1.0 с** | чистый JSON — выбрана |
+| anthropic/claude-haiku-4.5 | ~1.7–2.2 с | JSON в markdown-обёртке |
+| z-ai/glm-4.6v | 6–9 с | таймауты, дисквалификация |
 
 ## Запуск
 
-Открыть https://povodyr.netlify.app на телефоне (HTTPS обязателен для камеры),
-при первом запросе ввести OpenRouter API key (сохраняется в localStorage).
-«Старт камеры» → указать цель → «Навигация».
+Открыть https://povodyr.netlify.app на телефоне (HTTPS обязателен для камеры).
+«Старт камеры» → «🎤 Цель голосом» (или впиши в поле; пустая цель = режим
+«описываю, что впереди») → «Навигация».
 
 ## Команда
 
