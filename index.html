@@ -37,6 +37,7 @@
 </div>
 <div>
   <button id="btnNav" disabled>Навигация</button>
+  <button id="btnEars" disabled aria-label="Постоянное прослушивание команд">🎙 Слух: вкл</button>
   <button id="btnShot" disabled>Один кадр</button>
   <button id="btnShootout" disabled>Шутаут</button>
 </div>
@@ -51,13 +52,14 @@
 <script>
 // ===== КОНФИГ =====
 // Ключ OpenRouter живёт на сервере (Netlify Function /api/vlm), в браузере его нет.
-// шутаут v2 (реальные фото, 4 кадра, 3 судьи): 30b — точность сцены №1, ноль галлюцинаций,
-// единственная увидела «человека в белой рубашке» (полевой провал 8b); латенси ~2-3с
-const MODEL = "qwen/qwen3-vl-30b-a3b-instruct";
+// шутаут v3 (запрос «лучшее зрение, цена не важна»): opus-4.8-fast — идеальные канарейки
+// (человек вплотную → стоп; «человек с чемоданом в трёх шагах, обходите слева»), 2.0-2.9с тёплая.
+// gpt-5.5 вернул null (reasoning съел токены), qwen3-vl-235b — таймаут >9с, opus-4.5 не увидел человека
+const MODEL = "anthropic/claude-opus-4.8-fast";
 const SHOOTOUT_MODELS = [
+  "anthropic/claude-opus-4.8-fast",
+  "anthropic/claude-sonnet-5",
   "qwen/qwen3-vl-30b-a3b-instruct",
-  "qwen/qwen3-vl-8b-instruct",
-  "anthropic/claude-haiku-4.5",
 ];
 const TICK_MS = 300;        // пауза между ответом и следующим кадром (рычаг M4)
 const DESCRIBE_TICK_MS = 1200; // в режиме описания говорим реже — не утомлять
@@ -96,16 +98,18 @@ document.getElementById("btnStart").onclick = async () => {
       log("Камера потеряна (трек завершён)", "err");
       speak("Камера потеряна. Перезапустите камеру.");
       stopNav();
+      stopBgListening();
       // без камеры голос вести не может — гасим всё, кроме повторного старта камеры
-      for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic"]) document.getElementById(id).disabled = true;
+      for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic", "btnEars"]) document.getElementById(id).disabled = true;
     };
-    for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic"]) document.getElementById(id).disabled = false;
+    for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic", "btnEars"]) document.getElementById(id).disabled = false;
     log("Камера запущена");
     // сразу описываем окружение: незрячему не нужно искать вторую кнопку
     speak(goalText()
       ? "Камера включена. Веду к цели: " + goalText()
-      : "Камера включена. Описываю, что впереди. Коснитесь экрана и скажите, куда вести.");
+      : "Камера включена. Описываю, что впереди. Скажите, куда вести — я слушаю.");
     if (!navOn) startNav(false);
+    startBgListening(); // постоянный слух: цель можно сказать без касаний
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
   }
@@ -133,6 +137,9 @@ function speakNow(text) {
   u.lang = "ru-RU";
   u.rate = speechRate;
   u.onstart = () => { speechEverStarted = true; };
+  // для эхо-фильтра постоянного слуха: что и когда мы сами сказали
+  lastTtsText = text;
+  u.onend = () => { lastTtsEndAt = performance.now(); };
   lastU = u;
   speechSynthesis.speak(u);
   speechSynthesis.resume(); // Chrome иногда остаётся в paused после сворачивания
@@ -196,6 +203,7 @@ function parseVoiceCommand(phrase) {
 function startListening() {
   if (!SR) { speak("Голосовой ввод недоступен, впишите цель в поле"); return; }
   if (listening) return; // второй rec.start() поверх первого кидает InvalidStateError
+  stopBgListening(); // одна SR-сессия на страницу: фоновый слух уступает tap-сессии
   try { speechSynthesis.cancel(); } catch (e) {}
   listening = true;
   btnMic.classList.add("listening");
@@ -208,46 +216,13 @@ function startListening() {
     listening = false;
     btnMic.classList.remove("listening");
     btnMic.textContent = "🎤 Цель голосом";
+    setTimeout(startBgListening, 400); // вернуть фоновый слух после tap-сессии
   };
   rec.onresult = (e) => {
     done();
     const phrase = e.results[0][0].transcript.trim();
     if (!phrase) return;
-    const cmd = parseVoiceCommand(phrase);
-    if (cmd.type === "stop") {
-      stopNav();
-      log("Голос: стоп");
-      speak("Остановился. Коснитесь экрана и скажите, куда вести.");
-      return;
-    }
-    if (cmd.type === "unclear") { // подслушанная длинная фраза не должна молча стать целью
-      log("Голос: не понял — «" + phrase + "»", "err");
-      speak("Не понял. Скажите: хочу дойти до — и назовите цель.");
-      return;
-    }
-    if (cmd.type === "rate") {
-      speechRate = Math.min(1.8, Math.max(0.8, speechRate + (cmd.faster ? 0.2 : -0.2)));
-      try { localStorage.setItem("povodyr_rate", String(speechRate)); } catch (e) {}
-      log("Голос: темп речи " + speechRate.toFixed(1));
-      speak(cmd.faster ? "Говорю быстрее" : "Говорю медленнее");
-      return;
-    }
-    if (cmd.type === "describe") {
-      goalEl.value = "";
-      history = [];
-      goalEpoch++;
-      log("Голос: режим описания");
-      if (!navOn) startNav(false);
-      speak("Описываю, что впереди.");
-      return;
-    }
-    goalEl.value = cmd.goal;
-    history = [];
-    arrivedStreak = 0;
-    goalEpoch++;
-    log("Цель (голосом): " + cmd.goal + (cmd.extracted ? " — из фразы: «" + phrase + "»" : ""));
-    speak("Веду к цели: " + cmd.goal);
-    if (!navOn) startNav(false);
+    handleVoiceCommand(parseVoiceCommand(phrase), phrase);
   };
   rec.onerror = (e) => {
     done();
@@ -264,6 +239,44 @@ function startListening() {
   rec.start();
 }
 
+// общий обработчик распознанной команды (и для tap-сессии, и для фонового слуха)
+function handleVoiceCommand(cmd, phrase) {
+  if (cmd.type === "stop") {
+    stopNav();
+    log("Голос: стоп");
+    speak("Остановился. Скажите, куда вести.");
+    return;
+  }
+  if (cmd.type === "unclear") { // подслушанная длинная фраза не должна молча стать целью
+    log("Голос: не понял — «" + phrase + "»", "err");
+    speak("Не понял. Скажите: хочу дойти до — и назовите цель.");
+    return;
+  }
+  if (cmd.type === "rate") {
+    speechRate = Math.min(1.8, Math.max(0.8, speechRate + (cmd.faster ? 0.2 : -0.2)));
+    try { localStorage.setItem("povodyr_rate", String(speechRate)); } catch (e) {}
+    log("Голос: темп речи " + speechRate.toFixed(1));
+    speak(cmd.faster ? "Говорю быстрее" : "Говорю медленнее");
+    return;
+  }
+  if (cmd.type === "describe") {
+    goalEl.value = "";
+    history = [];
+    goalEpoch++;
+    log("Голос: режим описания");
+    if (!navOn) startNav(false);
+    speak("Описываю, что впереди.");
+    return;
+  }
+  goalEl.value = cmd.goal;
+  history = [];
+  arrivedStreak = 0;
+  goalEpoch++;
+  log("Цель (голосом): " + cmd.goal + (cmd.extracted ? " — из фразы: «" + phrase + "»" : ""));
+  speak("Веду к цели: " + cmd.goal);
+  if (!navOn) startNav(false);
+}
+
 btnMic.onclick = startListening;
 
 // весь экран — кнопка микрофона: незрячему проще хлопнуть по экрану, чем искать кнопку
@@ -272,6 +285,81 @@ document.addEventListener("click", (e) => {
   if (btnMic.disabled) return; // камера ещё не запущена — TTS-подсказки не глушим
   startListening();
 });
+
+// ===== ПОСТОЯННЫЙ СЛУХ: фоновое распознавание, цель можно сказать без касаний =====
+// Отличие от tap-сессии: TTS НЕ глушится (флаг listening не ставится), поэтому нужен
+// эхо-фильтр — иначе телефон услышит собственные команды («…остановись» → стоп).
+let alwaysListen = true;
+try { alwaysListen = localStorage.getItem("povodyr_ears") !== "off"; } catch (e) {}
+let bgRec = null, bgActive = false;
+let lastTtsText = "", lastTtsEndAt = 0;
+const btnEars = document.getElementById("btnEars");
+
+function looksLikeEcho(phrase) {
+  if (speechSynthesis.speaking || speechSynthesis.pending) return true;
+  if (performance.now() - lastTtsEndAt < 1200) return true;
+  // больше половины значимых слов совпало с последней озвученной фразой — это эхо
+  const pw = phrase.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  const tw = new Set(lastTtsText.toLowerCase().split(/\s+/));
+  return pw.length > 0 && pw.filter(w => tw.has(w)).length / pw.length > 0.5;
+}
+
+function startBgListening() {
+  if (!SR || !alwaysListen || bgActive || listening || btnMic.disabled) return;
+  const rec = new SR();
+  bgRec = rec;
+  bgActive = true;
+  rec.lang = "ru-RU";
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  rec.onresult = (e) => {
+    const r = e.results[e.results.length - 1];
+    const phrase = (r && r[0] ? r[0].transcript : "").trim();
+    if (!phrase) return;
+    if (looksLikeEcho(phrase)) { log("🎙 эхо: «" + phrase + "»"); return; }
+    const cmd = parseVoiceCommand(phrase);
+    // фоновый слух действует только на УВЕРЕННЫЕ команды: стоп/описание/темп/«дойти до X»;
+    // свободная фраза без глагола цели — только через касание экрана
+    if (cmd.type === "unclear" || (cmd.type === "goal" && !cmd.extracted)) {
+      log("🎙 фон: «" + phrase + "»");
+      return;
+    }
+    log("🎙 услышал: «" + phrase + "»");
+    handleVoiceCommand(cmd, phrase);
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      alwaysListen = false; // без доступа к микрофону не рестартуем бесконечно
+      updateEarsBtn();
+      log("Постоянный слух выключен: нет доступа к микрофону", "err");
+    }
+  };
+  rec.onend = () => { // сессии SR смертны (тишина/лимит) — перезапускаем, пока слух включён
+    bgActive = false;
+    if (alwaysListen && !listening) setTimeout(startBgListening, 400);
+  };
+  try { rec.start(); } catch (e) { bgActive = false; }
+}
+
+function stopBgListening() {
+  if (!bgRec) return;
+  try { bgRec.onend = null; bgRec.stop(); } catch (e) {}
+  bgRec = null;
+  bgActive = false;
+}
+
+function updateEarsBtn() {
+  btnEars.textContent = alwaysListen ? "🎙 Слух: вкл" : "🎙 Слух: выкл";
+}
+btnEars.onclick = () => {
+  alwaysListen = !alwaysListen;
+  try { localStorage.setItem("povodyr_ears", alwaysListen ? "on" : "off"); } catch (e) {}
+  updateEarsBtn();
+  if (alwaysListen) { startBgListening(); speak("Постоянный слух включён"); }
+  else { stopBgListening(); speak("Постоянный слух выключен"); }
+};
+updateEarsBtn();
 
 goalEl.addEventListener("change", () => {
   history = [];
@@ -289,12 +377,16 @@ function systemPrompt() {
   const goal = goalText();
   if (!goal) {
     return `Ты — глаза незрячего пешехода. Телефон висит у него на груди, камера смотрит вперёд, он медленно идёт. ` +
-      `Одной короткой фразой по-русски (максимум 12 слов) скажи самое важное для его следующего шага, по приоритету: ` +
-      `1) опасность на пути (ступени, яма, машина, человек, стекло) — тогда hazard=true и direction="stop"; ` +
-      `2) препятствие впереди и с какой стороны его обойти; 3) что впереди и где проход. ` +
-      `Если прямо по курсу видна читаемая вывеска, табличка или номер — назови её текст точно. ` +
-      `Расстояния давай в шагах. Говори о мире, а не о картинке: запрещены слова «изображение», «кадр», «фото», «вижу». ` +
-      `Не уверен в стороне — не выдумывай её. Не повторяй прошлую фразу, если ничего не изменилось — скажи новую деталь. ` +
+      `Одной короткой фразой по-русски (максимум 12 слов) скажи самое важное для его СЛЕДУЮЩЕГО ШАГА, по приоритету: ` +
+      `1) реальная опасность в 1-3 шагах на пути (ступени, яма, машина, кабель, человек вплотную) — hazard=true и direction="stop"; ` +
+      `2) препятствие в 1-5 шагах и с какой стороны его обойти; 3) свободный проход — куда идти; ` +
+      `4) читаемая вывеска или табличка прямо по курсу — прочитай её текст точно. ` +
+      `ВСЕГДА оценивай дистанцию в шагах (один шаг — примерно 0.7 метра). ` +
+      `Далёкое (больше 10 шагов), за стеклом или в другой комнате — не препятствие: упоминай фоном с hazard=false. ` +
+      `hazard=true ТОЛЬКО для непосредственной угрозы в паре шагов, не для фона. ` +
+      `Смотри на текущую сцену свежим взглядом: прошлые фразы даны, только чтобы НЕ повторять их дословно — ` +
+      `если сцена та же, дай новую деталь или уточни дистанцию. ` +
+      `Говори о мире, а не о картинке: запрещены слова «изображение», «кадр», «фото», «вижу». Не уверен в стороне — не выдумывай её. ` +
       `Отвечай ТОЛЬКО JSON ровно с четырьмя полями: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": false}`;
   }
   return `Ты — навигатор незрячего пешехода. Телефон на его груди, камера смотрит вперёд, он идёт медленно. ` +
@@ -346,17 +438,28 @@ function tolerantParse(s) {
 }
 
 // ===== ОБРАБОТКА ОТВЕТА (общая для тика и одиночного кадра) =====
+let lastSpoken = "", repeatRun = 0; // дословные повторы модели не долбим в уши каждый тик
 function handleResult(parsed, raw, ms) {
   if (!parsed || !parsed.instruction) {
     log(`[${ms}ms] мусор в ответе, тик пропущен: ` + raw.slice(0, 120), "err");
     return false;
   }
-  speak(parsed.instruction);
-  vibrate(parsed.direction, parsed.hazard);
+  const isRepeat = parsed.instruction === lastSpoken;
+  repeatRun = isRepeat ? repeatRun + 1 : 0;
+  lastSpoken = parsed.instruction;
+  vibrate(parsed.direction, parsed.hazard); // вибрация — канал безопасности, её не подавляем
   bigCmd.textContent = parsed.instruction;
-  log(`[${ms}ms] ${parsed.instruction} (${parsed.direction}${parsed.hazard ? ", ОПАСНОСТЬ" : ""})`, parsed.hazard ? "haz" : "lat");
-  history.push(parsed.instruction);
-  if (history.length > 3) history.shift();
+  if (isRepeat && repeatRun % 3 !== 0) {
+    // ту же фразу озвучиваем лишь каждый третий раз — иначе спам в уши
+    log(`[${ms}ms] повтор подавлен: ${parsed.instruction}`, parsed.hazard ? "haz" : "lat");
+  } else {
+    speak(parsed.instruction);
+    log(`[${ms}ms] ${parsed.instruction} (${parsed.direction}${parsed.hazard ? ", ОПАСНОСТЬ" : ""})`, parsed.hazard ? "haz" : "lat");
+  }
+  if (!isRepeat) { // history — только уникальные фразы, дубли не вытесняют контекст
+    history.push(parsed.instruction);
+    if (history.length > 3) history.shift();
+  }
   if (parsed.arrived && goalText()) {
     arrivedStreak++;
     if (arrivedStreak >= 2) { // один ложный arrived не должен ронять навигацию
@@ -408,6 +511,7 @@ function startNav(announce = true) {
   history = [];
   errStreak = 0;
   arrivedStreak = 0;
+  lastSpoken = ""; repeatRun = 0;
   btnNav.textContent = "Стоп";
   btnNav.classList.add("stop");
   if (announce) speak(goalText() ? "Навигация запущена" : "Описываю, что впереди");
