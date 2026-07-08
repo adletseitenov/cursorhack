@@ -28,12 +28,12 @@
 </head>
 <body>
 <h3 style="margin:4px 0">Поводырь</h3>
-<video id="cam" playsinline autoplay muted></video>
-<label>Цель (пусто — описываю, что впереди). Коснись экрана и скажи: «хочу дойти до …»; «стоп» — остановить; «что вокруг» — снова описание:</label>
+<video id="cam" playsinline autoplay muted aria-hidden="true"></video>
+<label for="goal">Цель (пусто — описываю, что впереди). Коснись экрана и скажи: «хочу дойти до …»; «стоп» — остановить; «что вокруг» — снова описание; «говори быстрее/медленнее» — темп:</label>
 <input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
 <div>
-  <button id="btnStart">Старт камеры</button>
-  <button id="btnMic" disabled>🎤 Цель голосом</button>
+  <button id="btnStart" aria-label="Старт камеры и начало описания окружения">Старт камеры</button>
+  <button id="btnMic" disabled aria-label="Сказать цель голосом">🎤 Цель голосом</button>
 </div>
 <div>
   <button id="btnNav" disabled>Навигация</button>
@@ -41,9 +41,9 @@
   <button id="btnShootout" disabled>Шутаут</button>
 </div>
 <div id="bigCmd"></div>
-<div id="status"></div>
-<!-- Judge view: что «видит» и «думает» модель -->
-<div id="judge">
+<div id="status" aria-hidden="true"></div>
+<!-- Judge view: что «видит» и «думает» модель — для зрячих отладчиков, скринридеру не нужен -->
+<div id="judge" aria-hidden="true">
   <img id="lastFrame" alt="">
   <div id="log"></div>
 </div>
@@ -126,10 +126,12 @@ function captureFrame() {
 let listening = false; // пока слушаем микрофон — молчим, иначе телефон услышит сам себя
 let lastU = null;      // глобальная ссылка: GC убивает локальный utterance до озвучки
 let speechEverStarted = false, speechAttempts = 0, muteWarned = false;
+let speechRate = 1.2; // голосом: «говори быстрее» / «медленнее»
+try { speechRate = Math.min(1.8, Math.max(0.8, parseFloat(localStorage.getItem("povodyr_rate")) || 1.2)); } catch (e) {}
 function speakNow(text) {
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "ru-RU";
-  u.rate = 1.2;
+  u.rate = speechRate;
   u.onstart = () => { speechEverStarted = true; };
   lastU = u;
   speechSynthesis.speak(u);
@@ -181,6 +183,8 @@ function parseVoiceCommand(phrase) {
   // не \b: границы слов в JS-регэкспах не работают с кириллицей
   if (/^(стоп|стой|останови(сь)?|хватит|замолчи|пауза)(\s|$)/.test(p)) return { type: "stop" };
   if (/^(что (впереди|вокруг|там)|опиши|описывай|режим описания)/.test(p)) return { type: "describe" };
+  const rm = p.match(/^(?:говори\s+)?(?:по)?(быстрее|медленнее)$/);
+  if (rm) return { type: "rate", faster: rm[1] === "быстрее" };
   const m = p.match(/^(?:я\s+)?(?:хочу\s+|мне\s+нужно\s+|надо\s+)?(?:дойти|дойди|подойти|подойди|пойти|пройти|веди|вести|отведи|доведи|найди|найти)(?:\s+меня)?\s*(?:до|к|ко)?\s+(.{2,})$/);
   if (m) return { type: "goal", goal: m[1].trim(), extracted: true };
   // фраза без глагола цели: «пожалуйста стоп» → стоп; длинный подслушанный разговор → переспросить
@@ -221,6 +225,13 @@ function startListening() {
       speak("Не понял. Скажите: хочу дойти до — и назовите цель.");
       return;
     }
+    if (cmd.type === "rate") {
+      speechRate = Math.min(1.8, Math.max(0.8, speechRate + (cmd.faster ? 0.2 : -0.2)));
+      try { localStorage.setItem("povodyr_rate", String(speechRate)); } catch (e) {}
+      log("Голос: темп речи " + speechRate.toFixed(1));
+      speak(cmd.faster ? "Говорю быстрее" : "Говорю медленнее");
+      return;
+    }
     if (cmd.type === "describe") {
       goalEl.value = "";
       history = [];
@@ -257,7 +268,7 @@ btnMic.onclick = startListening;
 
 // весь экран — кнопка микрофона: незрячему проще хлопнуть по экрану, чем искать кнопку
 document.addEventListener("click", (e) => {
-  if (e.target.closest("button, input, a, #judge")) return; // judge-лог оставляем зрячим
+  if (e.target.closest("button, input, label, a, #judge")) return; // judge-лог оставляем зрячим
   if (btnMic.disabled) return; // камера ещё не запущена — TTS-подсказки не глушим
   startListening();
 });
@@ -281,6 +292,7 @@ function systemPrompt() {
       `Одной короткой фразой по-русски (максимум 12 слов) скажи самое важное для его следующего шага, по приоритету: ` +
       `1) опасность на пути (ступени, яма, машина, человек, стекло) — тогда hazard=true и direction="stop"; ` +
       `2) препятствие впереди и с какой стороны его обойти; 3) что впереди и где проход. ` +
+      `Если прямо по курсу видна читаемая вывеска, табличка или номер — назови её текст точно. ` +
       `Расстояния давай в шагах. Говори о мире, а не о картинке: запрещены слова «изображение», «кадр», «фото», «вижу». ` +
       `Не уверен в стороне — не выдумывай её. Не повторяй прошлую фразу, если ничего не изменилось — скажи новую деталь. ` +
       `Отвечай ТОЛЬКО JSON ровно с четырьмя полями: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": false}`;
