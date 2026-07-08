@@ -6,7 +6,8 @@
 <title>Поводырь</title>
 <link rel="icon" href="data:,">
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #111; color: #eee; }
+  /* cursor:pointer — обязателен: iOS Safari не шлёт click в document-делегирование с некликабельных элементов */
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #111; color: #eee; cursor: pointer; }
   video { width: 100%; max-width: 480px; background: #000; border-radius: 8px; }
   button { font-size: 18px; padding: 12px 20px; margin: 8px 8px 8px 0; border-radius: 8px; border: none; background: #2b6; color: #fff; }
   button:disabled { background: #555; }
@@ -28,8 +29,8 @@
 <body>
 <h3 style="margin:4px 0">Поводырь</h3>
 <video id="cam" playsinline autoplay muted></video>
-<label>Цель (пусто — описываю, что впереди):</label>
-<input id="goal" value="" placeholder="скажи цель кнопкой 🎤 или впиши сюда">
+<label>Цель (пусто — описываю, что впереди). Коснись экрана и скажи: «хочу дойти до …»; «стоп» — остановить; «что вокруг» — снова описание:</label>
+<input id="goal" value="" placeholder="коснись экрана и скажи цель, или впиши сюда">
 <div>
   <button id="btnStart">Старт камеры</button>
   <button id="btnMic" disabled>🎤 Цель голосом</button>
@@ -50,13 +51,16 @@
 <script>
 // ===== КОНФИГ =====
 // Ключ OpenRouter живёт на сервере (Netlify Function /api/vlm), в браузере его нет.
-const MODEL = "qwen/qwen3-vl-8b-instruct"; // дефолт до шутаута M2
+// шутаут v2 (реальные фото, 4 кадра, 3 судьи): 30b — точность сцены №1, ноль галлюцинаций,
+// единственная увидела «человека в белой рубашке» (полевой провал 8b); латенси ~2-3с
+const MODEL = "qwen/qwen3-vl-30b-a3b-instruct";
 const SHOOTOUT_MODELS = [
+  "qwen/qwen3-vl-30b-a3b-instruct",
   "qwen/qwen3-vl-8b-instruct",
-  "z-ai/glm-4.6v",
   "anthropic/claude-haiku-4.5",
 ];
 const TICK_MS = 300;        // пауза между ответом и следующим кадром (рычаг M4)
+const DESCRIBE_TICK_MS = 1200; // в режиме описания говорим реже — не утомлять
 const FETCH_TIMEOUT = 15000; // зависший запрос не должен останавливать цикл
 
 const cam = document.getElementById("cam");
@@ -79,6 +83,8 @@ function log(msg, cls) {
 
 // ===== КАМЕРА =====
 document.getElementById("btnStart").onclick = async () => {
+  // разблокировка TTS СИНХРОННО из жеста: iOS молча дропает все speak() до первого gesture-speak
+  try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 } },
@@ -90,10 +96,16 @@ document.getElementById("btnStart").onclick = async () => {
       log("Камера потеряна (трек завершён)", "err");
       speak("Камера потеряна. Перезапустите камеру.");
       stopNav();
+      // без камеры голос вести не может — гасим всё, кроме повторного старта камеры
+      for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic"]) document.getElementById(id).disabled = true;
     };
     for (const id of ["btnNav", "btnShot", "btnShootout", "btnMic"]) document.getElementById(id).disabled = false;
-    speak("Камера включена. Скажите цель или запустите навигацию.");
     log("Камера запущена");
+    // сразу описываем окружение: незрячему не нужно искать вторую кнопку
+    speak(goalText()
+      ? "Камера включена. Веду к цели: " + goalText()
+      : "Камера включена. Описываю, что впереди. Коснитесь экрана и скажите, куда вести.");
+    if (!navOn) startNav(false);
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
   }
@@ -161,8 +173,25 @@ function vibrate(dir, hazard) {
 
 // ===== STT: цель голосом =====
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-btnMic.onclick = () => {
+
+// «я хочу дойти до бутылки» → цель «бутылки»; «стоп» → стоп; «что вокруг» → описание
+function parseVoiceCommand(phrase) {
+  // iOS STT добавляет пунктуацию («Стоп.») — вычищаем до разбора
+  const p = phrase.toLowerCase().replace(/[.,!?…]+/g, " ").replace(/\s+/g, " ").trim();
+  // не \b: границы слов в JS-регэкспах не работают с кириллицей
+  if (/^(стоп|стой|останови(сь)?|хватит|замолчи|пауза)(\s|$)/.test(p)) return { type: "stop" };
+  if (/^(что (впереди|вокруг|там)|опиши|описывай|режим описания)/.test(p)) return { type: "describe" };
+  const m = p.match(/^(?:я\s+)?(?:хочу\s+|мне\s+нужно\s+|надо\s+)?(?:дойти|дойди|подойти|подойди|пойти|пройти|веди|вести|отведи|доведи|найди|найти)(?:\s+меня)?\s*(?:до|к|ко)?\s+(.{2,})$/);
+  if (m) return { type: "goal", goal: m[1].trim(), extracted: true };
+  // фраза без глагола цели: «пожалуйста стоп» → стоп; длинный подслушанный разговор → переспросить
+  if (/(^|\s)(стоп|стой|остановись|хватит)(\s|$)/.test(p)) return { type: "stop" };
+  if (p.split(" ").length > 4) return { type: "unclear" };
+  return { type: "goal", goal: p, extracted: false };
+}
+
+function startListening() {
   if (!SR) { speak("Голосовой ввод недоступен, впишите цель в поле"); return; }
+  if (listening) return; // второй rec.start() поверх первого кидает InvalidStateError
   try { speechSynthesis.cancel(); } catch (e) {}
   listening = true;
   btnMic.classList.add("listening");
@@ -180,38 +209,91 @@ btnMic.onclick = () => {
     done();
     const phrase = e.results[0][0].transcript.trim();
     if (!phrase) return;
-    goalEl.value = phrase;
+    const cmd = parseVoiceCommand(phrase);
+    if (cmd.type === "stop") {
+      stopNav();
+      log("Голос: стоп");
+      speak("Остановился. Коснитесь экрана и скажите, куда вести.");
+      return;
+    }
+    if (cmd.type === "unclear") { // подслушанная длинная фраза не должна молча стать целью
+      log("Голос: не понял — «" + phrase + "»", "err");
+      speak("Не понял. Скажите: хочу дойти до — и назовите цель.");
+      return;
+    }
+    if (cmd.type === "describe") {
+      goalEl.value = "";
+      history = [];
+      goalEpoch++;
+      log("Голос: режим описания");
+      if (!navOn) startNav(false);
+      speak("Описываю, что впереди.");
+      return;
+    }
+    goalEl.value = cmd.goal;
     history = [];
-    log("Цель (голосом): " + phrase);
-    speak("Веду к цели: " + phrase);
+    arrivedStreak = 0;
+    goalEpoch++;
+    log("Цель (голосом): " + cmd.goal + (cmd.extracted ? " — из фразы: «" + phrase + "»" : ""));
+    speak("Веду к цели: " + cmd.goal);
     if (!navOn) startNav(false);
   };
-  rec.onerror = (e) => { done(); log("STT ошибка: " + e.error, "err"); speak("Не расслышал, повторите"); };
+  rec.onerror = (e) => {
+    done();
+    log("STT ошибка: " + e.error, "err");
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      speak("Нет доступа к микрофону. Разрешите его в настройках браузера.");
+    } else if (e.error === "no-speech") {
+      speak("Не расслышал. Коснитесь экрана и повторите.");
+    } else if (e.error !== "aborted") {
+      speak("Не расслышал, повторите");
+    }
+  };
   rec.onend = done;
   rec.start();
-};
+}
+
+btnMic.onclick = startListening;
+
+// весь экран — кнопка микрофона: незрячему проще хлопнуть по экрану, чем искать кнопку
+document.addEventListener("click", (e) => {
+  if (e.target.closest("button, input, a, #judge")) return; // judge-лог оставляем зрячим
+  if (btnMic.disabled) return; // камера ещё не запущена — TTS-подсказки не глушим
+  startListening();
+});
 
 goalEl.addEventListener("change", () => {
   history = [];
+  arrivedStreak = 0; // недобранный arrived старой цели не должен засчитаться новой
+  goalEpoch++;
   log("Цель изменена: " + (goalText() || "(пусто — режим описания)"));
 });
 
 // ===== VLM-ЗАПРОС (через серверный прокси /api/vlm) =====
 let history = []; // последние 3 инструкции — против осцилляции лево/право
 
+// оба промпта — победители шутаута 2026-07-08 (3 варианта desc, 2 nav, 4 кадра, 3 судьи):
+// только эти дали stop+hazard на лестнице вниз; проигравшие вели «вперёд осторожно» в препятствие
 function systemPrompt() {
   const goal = goalText();
   if (!goal) {
-    return `Ты — глаза незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
-      `Опиши ОДНОЙ фразой по-русски (максимум 10 слов), что перед ним. ` +
-      `Препятствия и опасности на пути называй В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущее описание без необходимости. ` +
-      `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": false}`;
+    return `Ты — глаза незрячего пешехода. Телефон висит у него на груди, камера смотрит вперёд, он медленно идёт. ` +
+      `Одной короткой фразой по-русски (максимум 12 слов) скажи самое важное для его следующего шага, по приоритету: ` +
+      `1) опасность на пути (ступени, яма, машина, человек, стекло) — тогда hazard=true и direction="stop"; ` +
+      `2) препятствие впереди и с какой стороны его обойти; 3) что впереди и где проход. ` +
+      `Расстояния давай в шагах. Говори о мире, а не о картинке: запрещены слова «изображение», «кадр», «фото», «вижу». ` +
+      `Не уверен в стороне — не выдумывай её. Не повторяй прошлую фразу, если ничего не изменилось — скажи новую деталь. ` +
+      `Отвечай ТОЛЬКО JSON ровно с четырьмя полями: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": false}`;
   }
-  return `Ты — навигатор для незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
-    `Его цель: «${goal}». Веди его к цели. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
-    `Препятствия на пути — предупреждай В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущую команду без необходимости. ` +
-    `arrived: true ставь ТОЛЬКО когда цель занимает большую часть кадра и до неё меньше шага. ` +
-    `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": bool}`;
+  return `Ты — навигатор незрячего пешехода. Телефон на его груди, камера смотрит вперёд, он идёт медленно. ` +
+    `Цель: «${goal}». Одна команда по-русски, максимум 8 слов, приоритет: ` +
+    `1) опасность на пути (ступени, яма, препятствие вплотную) — hazard=true, direction="stop", скажи что и где; ` +
+    `2) цель видна — направление и число шагов к ней; ` +
+    `3) цель НЕ видна — команда поворота для поиска («поворачивайся направо») и direction в сторону поворота. ` +
+    `Шаги оценивай честно: один шаг — примерно 0.7 метра. Если командуешь stop — ставь hazard=true. ` +
+    `Говори о мире, не о картинке: запрещены «изображение», «кадр», «вижу». ` +
+    `arrived=true СТРОГО когда цель прямо перед грудью, занимает большую часть обзора, до неё меньше шага. ` +
+    `Отвечай ТОЛЬКО JSON ровно с четырьмя полями: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": bool}`;
 }
 
 async function askVLM(dataUri, model) {
@@ -224,7 +306,7 @@ async function askVLM(dataUri, model) {
     body: JSON.stringify({
       model: model,
       response_format: { type: "json_object" },
-      max_tokens: 100,
+      max_tokens: 160, // 100 не хватало моделям с markdown-обёрткой — JSON обрезался, тик терялся
       messages: [
         { role: "system", content: systemPrompt() },
         { role: "user", content: [
@@ -266,10 +348,14 @@ function handleResult(parsed, raw, ms) {
   if (parsed.arrived && goalText()) {
     arrivedStreak++;
     if (arrivedStreak >= 2) { // один ложный arrived не должен ронять навигацию
-      speak("Цель достигнута!");
       try { navigator.vibrate && navigator.vibrate([200, 100, 200, 100, 400]); } catch (e) {}
       log("=== ЦЕЛЬ ДОСТИГНУТА ===", "haz");
-      stopNav();
+      // цикл не останавливаем: возвращаемся к описанию окружения
+      goalEl.value = "";
+      history = [];
+      arrivedStreak = 0;
+      goalEpoch++;
+      speak("Цель достигнута! Описываю, что впереди.");
     }
   } else {
     arrivedStreak = 0;
@@ -293,6 +379,8 @@ let navOn = false;
 let busy = false;
 let errStreak = 0;     // подряд неудачных тиков: с 2-го — голосом «остановитесь»
 let arrivedStreak = 0; // arrived подтверждаем двумя тиками подряд
+let navEpoch = 0;      // поколение цикла: рестарт убивает тики прошлого поколения (не «два в полёте»)
+let goalEpoch = 0;     // поколение цели: ответ, отправленный со старой целью, не озвучивается
 
 function stopNav() {
   navOn = false;
@@ -303,6 +391,7 @@ function stopNav() {
 
 function startNav(announce = true) {
   navOn = true;
+  navEpoch++;  // тики прошлого запуска, ещё висящие в полёте, отбрасываются
   busy = false; // страховка от залипшего флага
   history = [];
   errStreak = 0;
@@ -311,7 +400,7 @@ function startNav(announce = true) {
   btnNav.classList.add("stop");
   if (announce) speak(goalText() ? "Навигация запущена" : "Описываю, что впереди");
   keepAwake();
-  tick();
+  scheduleNext(300); // не сразу tick(): дать вступительной фразе начаться, чтобы её не оборвал ответ
 }
 
 btnNav.onclick = () => {
@@ -321,10 +410,13 @@ btnNav.onclick = () => {
 
 // следующий тик — после паузы И конца текущей фразы (не обрывать речь на полуслове)
 function scheduleNext(delay) {
-  let waited = 0; // speechSynthesis.speaking может залипнуть — не ждать дольше 5 с
+  let waited = 0;
   const next = () => {
     if (!navOn || busy) return;
-    if ((speechSynthesis.speaking || listening) && waited < 5000) {
+    // listening ждём до 20 с (STT сам завершится) — тик во время прослушки терял бы команду;
+    // залипший speechSynthesis — не дольше 5 с
+    const cap = listening ? 20000 : 5000;
+    if ((speechSynthesis.speaking || listening) && waited < cap) {
       waited += 150;
       setTimeout(next, 150);
       return;
@@ -337,16 +429,23 @@ function scheduleNext(delay) {
 async function tick() {
   if (!navOn || busy) return;
   busy = true;
+  const myNav = navEpoch, myGoal = goalEpoch; // снимок поколений на момент отправки
   try {
     const frame = captureFrame(); // кадр снимается в момент отправки, не из буфера
     if (!frame) return;           // видео ещё не готово — finally перепланирует
     lastFrameEl.src = frame;
     const { parsed, raw, ms } = await askVLM(frame, MODEL);
+    if (myNav !== navEpoch) return; // навигацию перезапустили — тик чужого поколения умирает молча
     errStreak = 0;
     if (!navOn) return; // «Стоп» нажали, пока запрос был в полёте — не озвучивать
+    if (myGoal !== goalEpoch) { // цель сменили в полёте — команда старой цели не озвучивается
+      log(`[${ms}ms] ответ по старой цели отброшен`);
+      return;
+    }
     statusEl.textContent = `последний тик: ${ms}ms`;
     handleResult(parsed, raw, ms);
   } catch (e) {
+    if (myNav !== navEpoch) return; // ошибка чужого поколения не трогает errStreak нового
     errStreak++;
     log(`Ошибка тика (${errStreak} подряд): ` + e.message, "err");
     if (errStreak === 2 || errStreak === 10) {
@@ -354,8 +453,10 @@ async function tick() {
       try { navigator.vibrate && navigator.vibrate(VIBES.hazard); } catch (e2) {}
     }
   } finally {
-    busy = false;
-    if (navOn) scheduleNext(errStreak ? 2000 : TICK_MS);
+    if (myNav === navEpoch) { // busy и планирование принадлежат текущему поколению цикла
+      busy = false;
+      if (navOn) scheduleNext(errStreak ? 2000 : (goalText() ? TICK_MS : DESCRIBE_TICK_MS));
+    }
   }
 }
 
