@@ -52,13 +52,11 @@
 <script>
 // ===== КОНФИГ =====
 // Ключ OpenRouter живёт на сервере (Netlify Function /api/vlm), в браузере его нет.
-// шутаут v3 (запрос «лучшее зрение, цена не важна»): opus-4.8-fast — идеальные канарейки
-// (человек вплотную → стоп; «человек с чемоданом в трёх шагах, обходите слева»), 2.0-2.9с тёплая.
-// gpt-5.5 вернул null (reasoning съел токены), qwen3-vl-235b — таймаут >9с, opus-4.5 не увидел человека
-const MODEL = "anthropic/claude-opus-4.8-fast";
+// выбор пользователя: gemini-3.5-flash (2.4с, человека вплотную видит, дешевле opus)
+const MODEL = "google/gemini-3.5-flash";
 const SHOOTOUT_MODELS = [
+  "google/gemini-3.5-flash",
   "anthropic/claude-opus-4.8-fast",
-  "anthropic/claude-sonnet-5",
   "qwen/qwen3-vl-30b-a3b-instruct",
 ];
 const TICK_MS = 300;        // пауза между ответом и следующим кадром (рычаг M4)
@@ -108,9 +106,10 @@ document.getElementById("btnStart").onclick = async () => {
     // сразу описываем окружение: незрячему не нужно искать вторую кнопку
     speak(goalText()
       ? "Камера включена. Веду к цели: " + goalText()
-      : "Камера включена. Описываю, что впереди. Скажите, куда вести — я слушаю.");
+      : "Камера включена. Описываю, что впереди. " +
+        (alwaysListen ? "Скажите, куда вести — я слушаю." : "Коснитесь экрана и скажите, куда вести."));
     if (!navOn) startNav(false);
-    setTimeout(startBgListening, 2500); // слух — после того как камера и вступительная речь устаканятся
+    if (alwaysListen) setTimeout(startBgListening, 2500); // слух — после того как камера и речь устаканятся
   } catch (e) {
     log("Ошибка камеры: " + e.message, "err");
   }
@@ -229,7 +228,7 @@ function startListening() {
     done();
     log("STT ошибка: " + e.error, "err");
     if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      speak("Нет доступа к микрофону. Разрешите его в настройках браузера.");
+      speak("Нет доступа к микрофону или диктовке. Разрешите микрофон и включите Диктовку в настройках телефона.");
     } else if (e.error === "no-speech") {
       speak("Не расслышал. Коснитесь экрана и повторите.");
     } else if (e.error !== "aborted") {
@@ -237,8 +236,30 @@ function startListening() {
     }
   };
   rec.onend = done;
-  rec.start();
+  // rec.start() может бросить синхронно (мик ещё занят фоновой сессией — её stop() асинхронный);
+  // без catch тут навсегда залипал listening=true: весь TTS молчал, тики ждали по 20с
+  const myAttempt = ++recSeq;
+  const tryStart = (n) => {
+    if (myAttempt !== recSeq || !listening) return;
+    try {
+      rec.start();
+    } catch (e) {
+      if (n < 2) { setTimeout(() => tryStart(n + 1), 300); return; }
+      done();
+      log("STT не стартовал: " + e.message, "err");
+      speak("Микрофон не запустился. Попробуйте ещё раз.");
+    }
+  };
+  tryStart(0);
+  // сторожок: если браузер не прислал ни результата, ни ошибки — не держим слух вечно
+  setTimeout(() => {
+    if (myAttempt === recSeq && listening) {
+      try { rec.stop(); } catch (e) {}
+      done();
+    }
+  }, 12000);
 }
+let recSeq = 0;
 
 // общий обработчик распознанной команды (и для tap-сессии, и для фонового слуха)
 function handleVoiceCommand(cmd, phrase) {
@@ -290,8 +311,10 @@ document.addEventListener("click", (e) => {
 // ===== ПОСТОЯННЫЙ СЛУХ: фоновое распознавание, цель можно сказать без касаний =====
 // Отличие от tap-сессии: TTS НЕ глушится (флаг listening не ставится), поэтому нужен
 // эхо-фильтр — иначе телефон услышит собственные команды («…остановись» → стоп).
-let alwaysListen = true;
-try { alwaysListen = localStorage.getItem("povodyr_ears") !== "off"; } catch (e) {}
+// опт-ин: непрерывный микрофон + камера подвешивают iPhone (полевой тест 2026-07-08),
+// поэтому по умолчанию выключено — включается кнопкой (заодно это user gesture для iOS)
+let alwaysListen = false;
+try { alwaysListen = localStorage.getItem("povodyr_ears") === "on"; } catch (e) {}
 let bgRec = null, bgActive = false;
 let lastTtsText = "", lastTtsEndAt = 0;
 const btnEars = document.getElementById("btnEars");
@@ -367,7 +390,7 @@ function startBgListening() {
 
 function stopBgListening() {
   if (!bgRec) return;
-  try { bgRec.onend = null; bgRec.stop(); } catch (e) {}
+  try { bgRec.onend = null; bgRec.onresult = null; bgRec.onerror = null; bgRec.stop(); } catch (e) {}
   bgRec = null;
   bgActive = false;
 }
