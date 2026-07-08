@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Поводырь</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #111; color: #eee; }
+  video { width: 100%; max-width: 480px; background: #000; border-radius: 8px; }
+  button { font-size: 18px; padding: 12px 20px; margin: 8px 8px 8px 0; border-radius: 8px; border: none; background: #2b6; color: #fff; }
+  button:disabled { background: #555; }
+  #log { font-size: 15px; line-height: 1.5; margin-top: 10px; }
+  #log div { border-bottom: 1px solid #333; padding: 4px 0; }
+  .lat { color: #8cf; }
+  .err { color: #f66; }
+</style>
+</head>
+<body>
+<h3 style="margin:4px 0">Поводырь</h3>
+<video id="cam" playsinline autoplay muted></video>
+<div>
+  <button id="btnStart">Старт камеры</button>
+  <button id="btnShot" disabled>Один кадр → анализ</button>
+  <button id="btnShootout" disabled>Шутаут моделей</button>
+</div>
+<div id="status"></div>
+<div id="log"></div>
+
+<script>
+// ===== КОНФИГ =====
+const OPENROUTER_KEY = ""; // ключ сюда; если пусто — страница спросит один раз и сохранит в localStorage
+const MODEL = "qwen/qwen3-vl-8b-instruct"; // дефолт до шутаута M2
+const SHOOTOUT_MODELS = [
+  "qwen/qwen3-vl-8b-instruct",
+  "z-ai/glm-4.6v",
+  "anthropic/claude-haiku-4.5",
+];
+let GOAL = "бутылка воды на столе";
+
+function getKey() {
+  if (OPENROUTER_KEY) return OPENROUTER_KEY;
+  let k = localStorage.getItem("orkey");
+  if (!k) {
+    k = prompt("OpenRouter API key:");
+    if (k) localStorage.setItem("orkey", k.trim());
+  }
+  return k;
+}
+
+const cam = document.getElementById("cam");
+const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
+
+function log(msg, cls) {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = msg;
+  logEl.prepend(d);
+}
+
+// ===== КАМЕРА =====
+document.getElementById("btnStart").onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 } },
+      audio: false,
+    });
+    cam.srcObject = stream;
+    document.getElementById("btnShot").disabled = false;
+    document.getElementById("btnShootout").disabled = false;
+    speak("Камера включена");
+    log("Камера запущена");
+  } catch (e) {
+    log("Ошибка камеры: " + e.message, "err");
+  }
+};
+
+// ===== КАДР: downscale 768px, JPEG 0.6, data-URI =====
+function captureFrame() {
+  const w = 768;
+  const h = Math.round(cam.videoHeight * (w / cam.videoWidth));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(cam, 0, 0, w, h);
+  return c.toDataURL("image/jpeg", 0.6);
+}
+
+// ===== ГОЛОС =====
+function speak(text) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ru-RU";
+    u.rate = 1.2;
+    speechSynthesis.speak(u);
+  } catch (e) { /* нет TTS — молчим */ }
+}
+
+// ===== VLM-ЗАПРОС =====
+function systemPrompt() {
+  return `Ты — навигатор для незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
+    `Цель: ${GOAL}. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
+    `Препятствия на пути — предупреждай В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущую команду без необходимости. ` +
+    `Когда цель в полуметре — arrived: true. ` +
+    `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": bool}`;
+}
+
+async function askVLM(dataUri, model) {
+  const t0 = performance.now();
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + getKey(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: model,
+      response_format: { type: "json_object" },
+      max_tokens: 100,
+      messages: [
+        { role: "system", content: systemPrompt() },
+        { role: "user", content: [
+          { type: "text", text: "Кадр с камеры. Команда?" },
+          { type: "image_url", image_url: { url: dataUri } },
+        ]},
+      ],
+    }),
+  });
+  const ms = Math.round(performance.now() - t0);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} (${ms}ms): ` + (await resp.text()).slice(0, 200));
+  const data = await resp.json();
+  const raw = data.choices?.[0]?.message?.content || "";
+  return { parsed: tolerantParse(raw), raw, ms };
+}
+
+// толерантный парсер: срезать ```json-обёртки, вытащить {...}, при мусоре — null
+function tolerantParse(s) {
+  try {
+    s = s.replace(/```json|```/g, "").trim();
+    const m = s.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    return JSON.parse(m[0]);
+  } catch (e) { return null; }
+}
+
+// ===== M1: один кадр → голос =====
+document.getElementById("btnShot").onclick = async () => {
+  const frame = captureFrame();
+  statusEl.textContent = "Запрос...";
+  try {
+    const { parsed, raw, ms } = await askVLM(frame, MODEL);
+    statusEl.textContent = "";
+    if (parsed && parsed.instruction) {
+      speak(parsed.instruction);
+      log(`[${ms}ms] ${parsed.instruction} (${parsed.direction})`, "lat");
+    } else {
+      log(`[${ms}ms] мусор в ответе: ` + raw.slice(0, 120), "err");
+    }
+  } catch (e) {
+    statusEl.textContent = "";
+    log("Ошибка: " + e.message, "err");
+  }
+};
+
+// ===== M2: латенси-шутаут — один кадр по всем кандидатам =====
+document.getElementById("btnShootout").onclick = async () => {
+  const frame = captureFrame();
+  log("=== ШУТАУТ: один кадр → " + SHOOTOUT_MODELS.length + " моделей ===");
+  for (const m of SHOOTOUT_MODELS) {
+    try {
+      const { parsed, raw, ms } = await askVLM(frame, m);
+      log(`${m}: ${ms}ms → ` + (parsed ? `"${parsed.instruction}"` : "МУСОР: " + raw.slice(0, 80)), "lat");
+    } catch (e) {
+      log(`${m}: ОШИБКА ` + e.message, "err");
+    }
+  }
+  log("=== шутаут завершён ===");
+};
+</script>
+</body>
+</html>
