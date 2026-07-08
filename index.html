@@ -9,22 +9,37 @@
   video { width: 100%; max-width: 480px; background: #000; border-radius: 8px; }
   button { font-size: 18px; padding: 12px 20px; margin: 8px 8px 8px 0; border-radius: 8px; border: none; background: #2b6; color: #fff; }
   button:disabled { background: #555; }
-  #log { font-size: 15px; line-height: 1.5; margin-top: 10px; }
-  #log div { border-bottom: 1px solid #333; padding: 4px 0; }
+  button.stop { background: #d43; }
+  input { font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; width: 100%; max-width: 460px; box-sizing: border-box; }
+  #bigCmd { font-size: 28px; font-weight: 700; min-height: 40px; margin: 8px 0; color: #6f6; }
+  #judge { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+  #lastFrame { width: 200px; border-radius: 6px; background: #000; }
+  #log { font-size: 14px; line-height: 1.5; flex: 1; min-width: 250px; max-height: 320px; overflow-y: auto; }
+  #log div { border-bottom: 1px solid #333; padding: 3px 0; }
   .lat { color: #8cf; }
   .err { color: #f66; }
+  .haz { color: #fa0; font-weight: 700; }
+  label { font-size: 14px; color: #aaa; display: block; margin-top: 8px; }
 </style>
 </head>
 <body>
 <h3 style="margin:4px 0">Поводырь</h3>
 <video id="cam" playsinline autoplay muted></video>
+<label>Цель:</label>
+<input id="goal" value="бутылка воды на столе">
 <div>
   <button id="btnStart">Старт камеры</button>
-  <button id="btnShot" disabled>Один кадр → анализ</button>
-  <button id="btnShootout" disabled>Шутаут моделей</button>
+  <button id="btnNav" disabled>Навигация</button>
+  <button id="btnShot" disabled>Один кадр</button>
+  <button id="btnShootout" disabled>Шутаут</button>
 </div>
+<div id="bigCmd"></div>
 <div id="status"></div>
-<div id="log"></div>
+<!-- Judge view: что «видит» и «думает» модель -->
+<div id="judge">
+  <img id="lastFrame" alt="">
+  <div id="log"></div>
+</div>
 
 <script>
 // ===== КОНФИГ =====
@@ -35,7 +50,7 @@ const SHOOTOUT_MODELS = [
   "z-ai/glm-4.6v",
   "anthropic/claude-haiku-4.5",
 ];
-let GOAL = "бутылка воды на столе";
+const TICK_MS = 300; // пауза между ответом и следующим кадром (рычаг M4)
 
 function getKey() {
   if (OPENROUTER_KEY) return OPENROUTER_KEY;
@@ -50,6 +65,8 @@ function getKey() {
 const cam = document.getElementById("cam");
 const logEl = document.getElementById("log");
 const statusEl = document.getElementById("status");
+const bigCmd = document.getElementById("bigCmd");
+const lastFrameEl = document.getElementById("lastFrame");
 
 function log(msg, cls) {
   const d = document.createElement("div");
@@ -66,8 +83,7 @@ document.getElementById("btnStart").onclick = async () => {
       audio: false,
     });
     cam.srcObject = stream;
-    document.getElementById("btnShot").disabled = false;
-    document.getElementById("btnShootout").disabled = false;
+    for (const id of ["btnNav", "btnShot", "btnShootout"]) document.getElementById(id).disabled = false;
     speak("Камера включена");
     log("Камера запущена");
   } catch (e) {
@@ -96,10 +112,27 @@ function speak(text) {
   } catch (e) { /* нет TTS — молчим */ }
 }
 
+// ===== ВИБРАЦИЯ (iOS не умеет — молча пропускаем) =====
+const VIBES = {
+  hazard: [100, 50, 100, 50, 100],
+  left: [80],
+  right: [80, 60, 80],
+  forward: [40],
+};
+function vibrate(dir, hazard) {
+  try {
+    if (!navigator.vibrate) return;
+    navigator.vibrate(hazard ? VIBES.hazard : (VIBES[dir] || []));
+  } catch (e) {}
+}
+
 // ===== VLM-ЗАПРОС =====
+let history = []; // последние 3 инструкции — против осцилляции лево/право
+
 function systemPrompt() {
+  const goal = document.getElementById("goal").value || "бутылка воды на столе";
   return `Ты — навигатор для незрячего человека. Телефон у него на груди, камера смотрит вперёд. ` +
-    `Цель: ${GOAL}. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
+    `Цель: ${goal}. Дай ОДНУ команду по-русски, максимум 8 слов: направление и число шагов. ` +
     `Препятствия на пути — предупреждай В ПЕРВУЮ ОЧЕРЕДЬ. Не повторяй предыдущую команду без необходимости. ` +
     `Когда цель в полуметре — arrived: true. ` +
     `Отвечай ТОЛЬКО JSON: {"instruction": string, "direction": "forward"|"left"|"right"|"stop", "hazard": bool, "arrived": bool}`;
@@ -107,6 +140,7 @@ function systemPrompt() {
 
 async function askVLM(dataUri, model) {
   const t0 = performance.now();
+  const histText = history.length ? ` Предыдущие команды (свежие последними): ${history.join("; ")}.` : "";
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -120,7 +154,7 @@ async function askVLM(dataUri, model) {
       messages: [
         { role: "system", content: systemPrompt() },
         { role: "user", content: [
-          { type: "text", text: "Кадр с камеры. Команда?" },
+          { type: "text", text: "Кадр с камеры. Команда?" + histText },
           { type: "image_url", image_url: { url: dataUri } },
         ]},
       ],
@@ -143,19 +177,75 @@ function tolerantParse(s) {
   } catch (e) { return null; }
 }
 
-// ===== M1: один кадр → голос =====
+// ===== ОБРАБОТКА ОТВЕТА (общая для тика и одиночного кадра) =====
+function handleResult(parsed, raw, ms) {
+  if (!parsed || !parsed.instruction) {
+    log(`[${ms}ms] мусор в ответе, тик пропущен: ` + raw.slice(0, 120), "err");
+    return false;
+  }
+  speak(parsed.instruction);
+  vibrate(parsed.direction, parsed.hazard);
+  bigCmd.textContent = parsed.instruction;
+  log(`[${ms}ms] ${parsed.instruction} (${parsed.direction}${parsed.hazard ? ", ОПАСНОСТЬ" : ""})`, parsed.hazard ? "haz" : "lat");
+  history.push(parsed.instruction);
+  if (history.length > 3) history.shift();
+  if (parsed.arrived) {
+    speak(parsed.instruction + ". Цель достигнута!");
+    try { navigator.vibrate && navigator.vibrate([200, 100, 200, 100, 400]); } catch (e) {}
+    log("=== ЦЕЛЬ ДОСТИГНУТА ===", "haz");
+    stopNav();
+  }
+  return true;
+}
+
+// ===== M3: ЦИКЛ НАВИГАЦИИ — строго один запрос в полёте =====
+let navOn = false;
+let busy = false;
+const btnNav = document.getElementById("btnNav");
+
+function stopNav() {
+  navOn = false;
+  btnNav.textContent = "Навигация";
+  btnNav.classList.remove("stop");
+  statusEl.textContent = "";
+}
+
+btnNav.onclick = () => {
+  if (navOn) { stopNav(); speak("Навигация остановлена"); return; }
+  navOn = true;
+  history = [];
+  btnNav.textContent = "Стоп";
+  btnNav.classList.add("stop");
+  speak("Навигация запущена");
+  tick();
+};
+
+async function tick() {
+  if (!navOn || busy) return;
+  busy = true;
+  const frame = captureFrame(); // кадр снимается в момент отправки, не из буфера
+  lastFrameEl.src = frame;
+  try {
+    const { parsed, raw, ms } = await askVLM(frame, MODEL);
+    statusEl.textContent = `последний тик: ${ms}ms`;
+    handleResult(parsed, raw, ms);
+  } catch (e) {
+    log("Ошибка тика: " + e.message, "err");
+  } finally {
+    busy = false;
+    if (navOn) setTimeout(tick, TICK_MS);
+  }
+}
+
+// ===== один кадр (отладка) =====
 document.getElementById("btnShot").onclick = async () => {
   const frame = captureFrame();
+  lastFrameEl.src = frame;
   statusEl.textContent = "Запрос...";
   try {
     const { parsed, raw, ms } = await askVLM(frame, MODEL);
     statusEl.textContent = "";
-    if (parsed && parsed.instruction) {
-      speak(parsed.instruction);
-      log(`[${ms}ms] ${parsed.instruction} (${parsed.direction})`, "lat");
-    } else {
-      log(`[${ms}ms] мусор в ответе: ` + raw.slice(0, 120), "err");
-    }
+    handleResult(parsed, raw, ms);
   } catch (e) {
     statusEl.textContent = "";
     log("Ошибка: " + e.message, "err");
@@ -165,6 +255,7 @@ document.getElementById("btnShot").onclick = async () => {
 // ===== M2: латенси-шутаут — один кадр по всем кандидатам =====
 document.getElementById("btnShootout").onclick = async () => {
   const frame = captureFrame();
+  lastFrameEl.src = frame;
   log("=== ШУТАУТ: один кадр → " + SHOOTOUT_MODELS.length + " моделей ===");
   for (const m of SHOOTOUT_MODELS) {
     try {
